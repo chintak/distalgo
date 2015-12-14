@@ -23,11 +23,13 @@
 # WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 import sys
+import ipaddress
 import pickle
 import random
 import select
 import socket
 import logging
+import threading
 
 log = logging.getLogger("Endpoint")
 
@@ -57,9 +59,10 @@ class Protocol:
         return False
 
     def recv(self, conn):
-        """Receives a message
+        """Receives a message on `conn'.
+
         """
-        pass
+        return None
 
 class TcpProtocol(Protocol):
     def __init__(self, endpoint, port=None):
@@ -173,6 +176,8 @@ class TcpProtocol(Protocol):
             offset += recvd
         return msg
 
+PROTOCOLS = [TcpProtocol, UdpProtocol]
+
 class Connection:
     def __init__(self, sock, addr, proto):
         self.sock = sock
@@ -180,17 +185,12 @@ class Connection:
         self.proto = proto
 
     def fileno(self):
-        return self.sock.fileno
+        return self.sock.fileno()
 
 class EndPoint:
-    """Represents a target for sending of messages.
-
-    This is the base class for all types of communication channels in DistAlgo.
-    In most scenarios, a process will only be associated with one EndPoint
-    instance.
+    """Manages all communication channels for the current process.
 
     """
-
     def __init__(self, name=None, proctype=None):
         if name is None:
             self._name = 'localhost'
@@ -203,11 +203,18 @@ class EndPoint:
         self._connections = LRU(MAX_TCP_CONN)
 
     def start(self):
-        for proto in self.protocols:
-            proto.start(self)
+        # 1. get our IP address
+        try:
+            ipstr = socket.gethostbyname(self._name)
+            ip = ipaddress.ip_address(ipstr)
+            for proto in self.protocols:
+                port = proto.start(self, ip)
+        except socket.error as e:
+            self._log.error("Unable to start endpoint: ", e)
 
-    def register(self, conn, proto):
-        self._connections.add(conn)
+    def register(self, conn, addr, proto):
+        connobj = Connection(conn, addr, proto)
+        self._connections[addr] = connobj
 
     def deregister(self, conn):
         self._connections.remove(conn)
@@ -457,6 +464,7 @@ class LRU:
     def __init__(self, count, pairs=[]):
         self.count = max(count, 1)
         self.d = {}
+        self.lock = threading.RLock()
         self.first = None
         self.last = None
         for key, value in pairs:
@@ -464,41 +472,44 @@ class LRU:
     def __contains__(self, obj):
         return obj in self.d
     def __getitem__(self, obj):
-        a = self.d[obj].me
-        self[a[0]] = a[1]
-        return a[1]
+        with self.lock:
+            a = self.d[obj].me
+            self[a[0]] = a[1]
+            return a[1]
     def __setitem__(self, obj, val):
-        if obj in self.d:
-            del self[obj]
-        nobj = Node(self.last, (obj, val))
-        if self.first is None:
-            self.first = nobj
-        if self.last:
-            self.last.next = nobj
-        self.last = nobj
-        self.d[obj] = nobj
-        if len(self.d) > self.count:
-            if self.first == self.last:
-                self.first = None
-                self.last = None
-                return
-            a = self.first
-            a.next.prev = None
-            self.first = a.next
-            a.next = None
-            del self.d[a.me[0]]
-            del a
+        with self.lock:
+            if obj in self.d:
+                del self[obj]
+            nobj = Node(self.last, (obj, val))
+            if self.first is None:
+                self.first = nobj
+            if self.last:
+                self.last.next = nobj
+            self.last = nobj
+            self.d[obj] = nobj
+            if len(self.d) > self.count:
+                if self.first == self.last:
+                    self.first = None
+                    self.last = None
+                    return
+                a = self.first
+                a.next.prev = None
+                self.first = a.next
+                a.next = None
+                del self.d[a.me[0]]
+                del a
     def __delitem__(self, obj):
-        nobj = self.d[obj]
-        if nobj.prev:
-            nobj.prev.next = nobj.next
-        else:
-            self.first = nobj.next
-        if nobj.next:
-            nobj.next.prev = nobj.prev
-        else:
-            self.last = nobj.prev
-        del self.d[obj]
+        with self.lock:
+            nobj = self.d[obj]
+            if nobj.prev:
+                nobj.prev.next = nobj.next
+            else:
+                self.first = nobj.next
+            if nobj.next:
+                nobj.next.prev = nobj.prev
+            else:
+                self.last = nobj.prev
+            del self.d[obj]
     def __iter__(self):
         cur = self.first
         while cur != None:
@@ -523,9 +534,10 @@ class LRU:
     def keys(self):
         return self.d.keys()
     def get(self, k, d=None):
-        v = self.d.get(k)
-        if v is None: return None
-        a = v.me
-        self[a[0]] = a[1]
-        return a[1]
+        with self.lock:
+            v = self.d.get(k)
+            if v is None: return None
+            a = v.me
+            self[a[0]] = a[1]
+            return a[1]
 
