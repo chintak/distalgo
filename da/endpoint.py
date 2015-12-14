@@ -29,14 +29,165 @@ import select
 import socket
 import logging
 
+log = logging.getLogger("Endpoint")
+
+class Protocol:
+    """Defines a lower level transport protocol.
+
+    """
+    def __init__(self, endpoint, port=None):
+        self._ep = endpoint
+        self.port = port
+
+        self._log = logging.getLogger(self.__class__.__name__)
+
+    def start(self):
+        """Starts the protocol.
+
+        For wrapper protocols this creates and binds the lower level sockets.
+
+        """
+        pass
+
+    def send(self, msg, dest):
+        """Send `msg' to `dest'.
+
+        Returns `True' if send succeeded, `False' otherwise.
+        """
+        return False
+
+    def recv(self, conn):
+        """Receives a message
+        """
+        pass
+
+class TcpProtocol(Protocol):
+    def __init__(self, endpoint, port=None):
+        super().__init__(endpoint, port)
+
+    def start(self):
+        """Starts protocol.
+
+        """
+
+        self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        if self.port is None:
+            done = False
+            for _ in range(MAX_RETRY):
+                self.port = random.randint(MIN_TCP_PORT, MAX_TCP_PORT)
+                try:
+                    self.listener.bind((self._ep.hostname, self.port))
+                    done = True
+                    break
+                except socket.error:
+                    pass
+            if not done:
+                self._log.error("Unable to bind to free port.")
+                self.listener.close()
+        else:
+            try:
+                self.listener.bind((self._ep.hostname, self.port))
+            except socket.error:
+                self._log.error("Unable to bind to port %d", self.port)
+                self.listener.close()
+        return True
+
+    def recv(self, conn):
+        if conn is self.listener:
+            newconn, remote_addr = self.listener.accept()
+            self._ep.register(newconn, remote_addr, self)
+        else:
+            try:
+                bytedata = self._receive_1(INTEGER_BYTES, c)
+                datalen = int.from_bytes(bytedata, sys.byteorder)
+
+                bytedata = self._receive_1(datalen, c)
+                src, tstamp, data = pickle.loads(bytedata)
+                bytedata = None
+
+                if not isinstance(src, EndPoint):
+                    raise TypeError()
+                else:
+                    yield (src, tstamp, data)
+
+            except pickle.UnpicklingError as e:
+                self._log.warn("UnpicklingError, packet from %s dropped",
+                               TcpEndPoint.receivers[c])
+
+            except socket.error as e:
+                self._log.debug("Remote connection %s terminated.",
+                                str(c))
+                self._ep.deregister(conn, self)
+
+    def send(self, data, src, timestamp = 0):
+        retry = 1
+        while True:
+            conn = self._ep.get_connection(dest)
+            if conn is None:
+                conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                try:
+                    conn.connect(self._address)
+                    TcpEndPoint.senders[self] = conn
+                except socket.error:
+                    self._log.debug("Can not connect to %s. Peer is down.",
+                                   str(self._address))
+                    return False
+
+            bytedata = pickle.dumps((src, timestamp, data))
+            l = len(bytedata)
+            header = int(l).to_bytes(INTEGER_BYTES, sys.byteorder)
+            mesg = header + bytedata
+
+            if len(mesg) > MAX_TCP_BUFSIZE:
+                self._log.warn("Packet size exceeded maximum buffer size! "
+                               "Outgoing packet dropped.")
+                self._log.debug("Dropped packet: %s",
+                                str((src, timestamp, data)))
+                return False
+
+            else:
+                try:
+                    conn.sendall(mesg)
+                    self._log.debug("Sent packet %r to %r." % (data, self))
+                    return True
+                except socket.error as e:
+                    pass
+                self._log.debug("Error sending packet, retrying.")
+                retry += 1
+                if retry > MAX_RETRY:
+                    self._log.debug("Max send retry count reached, "
+                                    "attempting to reconnecting...")
+                    conn.close()
+                    self._ep.deregister(conn, self)
+                    retry = 1
+
+        return False
+
+    def _receive_1(self, totallen, conn):
+        msg = bytearray(totallen)
+        offset = 0
+        while offset < totallen:
+            recvd = conn.recv_into(memoryview(msg)[offset:])
+            if recvd == 0:
+                raise socket.error("EOF received")
+            offset += recvd
+        return msg
+
+class Connection:
+    def __init__(self, sock, addr, proto):
+        self.sock = sock
+        self.addr = addr
+        self.proto = proto
+
+    def fileno(self):
+        return self.sock.fileno
+
 class EndPoint:
     """Represents a target for sending of messages.
 
-    This is the base class for all types of communication channels in
-    DistAlgo. It uniquely identifies a "node" in the distributed system. In
-    most scenarios, a process will only be associated with one EndPoint
-    instance. The 'self' keyword in DistAlgo is ultimately translated into an
-    instance of this class.
+    This is the base class for all types of communication channels in DistAlgo.
+    In most scenarios, a process will only be associated with one EndPoint
+    instance.
 
     """
 
@@ -49,15 +200,23 @@ class EndPoint:
         self._proctype = proctype
         self._log = logging.getLogger("runtime.EndPoint")
         self._address = None
+        self._connections = LRU(MAX_TCP_CONN)
 
-    def send(self, data, src, timestamp = 0):
+    def start(self):
+        for proto in self.protocols:
+            proto.start(self)
+
+    def register(self, conn, proto):
+        self._connections.add(conn)
+
+    def deregister(self, conn):
+        self._connections.remove(conn)
+
+    def send(self, data, target, timestamp = 0):
         pass
 
     def recv(self, block, timeout = None):
         pass
-
-    def setname(self, name):
-        self._name = name
 
     def getlogname(self):
         if self._address is not None:
@@ -67,39 +226,6 @@ class EndPoint:
 
     def close(self):
         pass
-
-    ###################################################
-    # Make the EndPoint behave like a Process object:
-
-    def is_alive(self):
-        if self._proc is not None:
-            return self._proc.is_alive()
-        else:
-            self._log.warn("is_alive can only be called from parent process.")
-            return self
-
-    def join(self):
-        if self._proc is not None:
-            return self._proc.join()
-        else:
-            self._log.warn("join can only be called from parent process.")
-            return self
-
-    def terminate(self):
-        if self._proc is not None:
-            return self._proc.terminate()
-        else:
-            self._log.warn("terminate can only be called from parent process.")
-            return self
-
-    ###################################################
-
-    def __getstate__(self):
-        return ("EndPoint", self._address, self._name, self._proctype)
-
-    def __setstate__(self, value):
-        proto, self._address, self._name, self._proctype = value
-        self._log = logging.getLogger("runtime.EndPoint")
 
     def __str__(self):
         if self._address is not None:
@@ -113,25 +239,6 @@ class EndPoint:
         else:
             return "<process " + str(self) + ">"
 
-    def __hash__(self):
-        return hash(self._address)
-
-    def __eq__(self, obj):
-        if not hasattr(obj, "_address"):
-            return False
-        return self._address == obj._address
-    def __lt__(self, obj):
-        return self._address < obj._address
-    def __le__(self, obj):
-        return self._address <= obj._address
-    def __gt__(self, obj):
-        return self._address > obj._address
-    def __ge__(self, obj):
-        return self._address >= obj._address
-    def __ne__(self, obj):
-        if not hasattr(obj, "_address"):
-            return True
-        return self._address != obj._address
 
 
 # TCP Implementation:
@@ -141,6 +248,7 @@ INTEGER_BYTES = 8
 MAX_TCP_CONN = 200
 MIN_TCP_PORT = 10000
 MAX_TCP_PORT = 40000
+MAX_UDP_BUFSIZE = 20000
 MAX_TCP_BUFSIZE = 200000          # Maximum pickled message size
 MAX_RETRY = 5
 
@@ -255,7 +363,7 @@ class TcpEndPoint(EndPoint):
                         src, tstamp, data = pickle.loads(bytedata)
                         bytedata = None
 
-                        if not isinstance(src, TcpEndPoint):
+                        if not isinstance(src, EndPoint):
                             raise TypeError()
                         else:
                             yield (src, tstamp, data)
@@ -284,15 +392,50 @@ class TcpEndPoint(EndPoint):
     def close(self):
         pass
 
-    def __getstate__(self):
-        return ("TCP", self._address, self._name, self._proctype)
+    def _udp_init(self, name=None, proctype=None, port=None):
+        self._udpsock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        if port is None:
+            while True:
+                self._address = (self._name,
+                                 random.randint(MIN_UDP_PORT, MAX_UDP_PORT))
+                try:
+                    self._udpsock.bind(self._address)
+                    break
+                except socket.error:
+                    pass
+        else:
+            self._address = (self._name, port)
+            self._udpsock.bind(self._address)
 
-    def __setstate__(self, value):
-        proto, self._address, self._name, self._proctype = value
-        self._conn = None
-        self._log = logging.getLogger("runtime.TcpEndPoint(%s)" % self._name)
+        log.debug("UdpEndPoint %s initialization complete", str(self._address))
+
+    def send(self, data, tgt, timestamp = 0):
+        bytedata = pickle.dumps((self._pid, timestamp, data))
+        if len(bytedata) > MAX_UDP_BUFSIZE:
+            log.warn("Data size exceeded maximum buffer size! "
+                     "Outgoing packet dropped.")
+            log.debug("Dropped packet: %s", str(bytedata))
+
+        elif (self._udpsock.sendto(bytedata, self._address) !=
+              len(bytedata)):
+            raise socket.error()
+
+    def recvmesgs(self):
+        flags = 0
+
+        try:
+            while True:
+                bytedata = self._udpsock.recv(MAX_UDP_BUFSIZE, flags)
+                src, tstamp, data = pickle.loads(bytedata)
+                if not isinstance(src, EndPoint):
+                    raise TypeError()
+                else:
+                    yield (src, tstamp, data)
+        except socket.error as e:
+            self._log.debug("socket.error occured, terminating receive loop.")
 
 
+# Auxiliary datastructures:
 class Node(object):
     __slots__ = ['prev', 'next', 'me']
     def __init__(self, prev, me):
@@ -385,76 +528,4 @@ class LRU:
         a = v.me
         self[a[0]] = a[1]
         return a[1]
-
-
-# UDP Implementation:
-
-MIN_UDP_PORT = 10000
-MAX_UDP_PORT = 40000
-MAX_UDP_BUFSIZE = 20000
-
-class UdpEndPoint(EndPoint):
-    sender = None
-
-    def __init__(self, name=None, proctype=None, port=None):
-        super().__init__(name, proctype)
-
-        UdpEndPoint.sender = None
-
-        self._conn = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        if port is None:
-            while True:
-                self._address = (self._name,
-                                 random.randint(MIN_UDP_PORT, MAX_UDP_PORT))
-                try:
-                    self._conn.bind(self._address)
-                    break
-                except socket.error:
-                    pass
-        else:
-            self._address = (self._name, port)
-            self._conn.bind(self._address)
-
-        self._log = logging.getLogger("runtime.UdpEndPoint(%s)" %
-                                      super().getlogname())
-        self._log.debug("UdpEndPoint %s initialization complete",
-                        str(self._address))
-
-
-    def send(self, data, src, timestamp = 0):
-        if UdpEndPoint.sender is None:
-            UdpEndPoint.sender = socket.socket(socket.AF_INET,
-                                               socket.SOCK_DGRAM)
-
-        bytedata = pickle.dumps((src, timestamp, data))
-        if len(bytedata) > MAX_UDP_BUFSIZE:
-            self._log.warn("Data size exceeded maximum buffer size!" +
-                           " Outgoing packet dropped.")
-            self._log.debug("Dropped packet: %s", str((src, timestamp, data)))
-
-        elif (UdpEndPoint.sender.sendto(bytedata, self._address) !=
-              len(bytedata)):
-            raise socket.error()
-
-    def recvmesgs(self):
-        flags = 0
-
-        try:
-            while True:
-                bytedata = self._conn.recv(MAX_UDP_BUFSIZE, flags)
-                src, tstamp, data = pickle.loads(bytedata)
-                if not isinstance(src, UdpEndPoint):
-                    raise TypeError()
-                else:
-                    yield (src, tstamp, data)
-        except socket.error as e:
-            self._log.debug("socket.error occured, terminating receive loop.")
-
-    def __getstate__(self):
-        return ("UDP", self._address, self._name, self._proctype)
-
-    def __setstate__(self, value):
-        proto, self._address, self._name, self._proctype = value
-        self._conn = None
-        self._log = logging.getLogger("runtime.UdpEndPoint")
 

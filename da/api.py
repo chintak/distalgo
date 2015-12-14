@@ -37,10 +37,12 @@ import traceback
 import multiprocessing
 import os.path
 
-from . import common, sim, endpoint as ep
+import da
+from da import common, sim, config, endpoint as ep
 
 api = common.api
 deprecated = common.deprecated
+ModuleOptions = common.ModuleOptions
 
 DISTPY_SUFFIXES = [".da", ""]
 PYTHON_SUFFIX = ".py"
@@ -53,7 +55,7 @@ log._formatter = formatter
 PerformanceCounters = {}
 CounterLock = threading.Lock()
 RootLock = threading.Lock()
-EndPointType = ep.UdpEndPoint
+NodeQueue = None
 
 def find_file_on_paths(filename, paths):
     """Looks for a given 'filename' under a list of directories, in order.
@@ -129,43 +131,22 @@ def import_da(name, from_dir=None, compiler_args=[]):
             raise ImportError("Unable to compile %s, errno: %d" %
                               (fullpath, res))
 
-    return importlib.import_module(name)
-
-def use_channel(channel_properties):
-    global EndPointType
-
-    ept = ep.UdpEndPoint
-    if isinstance(channel_properties, str):
-        channel_properties = [channel_properties]
-    for prop in channel_properties:
-        if prop == "fifo":
-            ept = ep.TcpEndPoint
-        elif prop == "reliable":
-            ept = ep.TcpEndPoint
-        elif prop not in {"unfifo", "unreliable"}:
-            log.error("Unknown channel property %s", str(prop))
-            return
-
-    if common.current_process() is not None:
-        if EndPointType != ept:
-            log.warn(
-                "Can not change channel type after creating child processes.")
-        return
-    EndPointType = ept
-
-@api
-def config(**properties):
-    for prop in properties:
-        if prop == 'channel':
-            use_channel(properties['channel'])
-        elif prop == 'clock':
-            setattr(common.global_options(), 'clock', properties[prop])
-        elif prop == 'handling':
-            setattr(common.global_options(), 'handling', properties[prop])
-        else:
-            log.warn("Unknown configuration type '%s'." % str(prop))
+    modobj = importlib.import_module(name)
+    if not hasattr(modobj, "__DA_COMPILER_VERSION__"):
+        compiler_version = "older than 1.0.0b16"
+    else:
+        compiler_version = modobj.__DA_COMPILER_VERSION__
+    if not compiler_version  == da.__version__:
+        raise ImportError("Compiler version mismatch: "
+                          "current runtime version is %s; "
+                          "module '%s' was compiled with version %s. "
+                          "Please recompile module." %
+                          (da.__version__, name, compiler_version))
+    return modobj
 
 def entrypoint():
+    global NodeQueue
+
     GlobalOptions = common.global_options()
     if GlobalOptions.start_method != \
        multiprocessing.get_start_method(allow_none=True):
@@ -191,8 +172,10 @@ def entrypoint():
     if GlobalOptions.inc_module_name is None:
         GlobalOptions.inc_module_name = module.__name__ + "_inc"
     common.sysinit()
+    common.set_current_process(ep.EndPoint())
 
     # Start the background statistics thread:
+    NodeQueue = multiprocessing.Queue()
     RootLock.acquire()
     stat_th = threading.Thread(target=collect_statistics,
                                name="Stat Thread")
@@ -216,7 +199,6 @@ def entrypoint():
 
             walltime = time.perf_counter() - walltime_start
 
-            #log_performance_statistics(walltime)
             r = aggregate_statistics()
             for k, v in r.items():
                 stats[k] += v
@@ -253,16 +235,10 @@ def new(pcls, args=None, num=1, **props):
         log.error("Can not create non-DistProcess.")
         return set()
 
-    if common.current_process() is None:
-        if type(EndPointType) == type:
-            common.set_current_process(EndPointType())
-            common.current_process().shared = multiprocessing.Value("i", 0)
-            RootLock.release()
-        else:
-            log.error("EndPoint not defined")
-            return
-    log.debug("Current process is %s" % str(common.current_process()))
+    if NodeQueue is None:
+        raise RuntimeError("DistAlgo subsystem not initialized.")
 
+    log.debug("Current process is %s" % str(common.current_process()))
     log.debug("Creating %d instances of %s.." % (num, str(pcls)))
     pipes = []
     iterator = []
@@ -278,8 +254,7 @@ def new(pcls, args=None, num=1, **props):
     daemon = props['daemon'] if 'daemon' in props else False
     for i in iterator:
         (childp, ownp) = multiprocessing.Pipe()
-        p = pcls(common.current_process(), childp,
-                 type(common.current_process()), props)
+        p = pcls(NodeQueue, childp, props)
         p.daemon = daemon
         if isinstance(i, str):
             p.set_name(i)
@@ -354,9 +329,8 @@ def collect_statistics():
     completed = 0
     try:
         RootLock.acquire()
-        for mesg in common.current_process().recvmesgs():
-            src, tstamp, tup = mesg
-            event_type, count = tup
+        for mesg in NodeQueue.get():
+            src, (event_type, count) = mesg
 
             CounterLock.acquire()
             if PerformanceCounters.get(src) is not None:

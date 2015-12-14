@@ -160,7 +160,8 @@ else:
 
 
 class Controller(process):
-    
+    config(channel=reliable)
+
     def setup(nprocs):
         # Processes we are controlling, and number
         # of processes that have sent ready/done messages.

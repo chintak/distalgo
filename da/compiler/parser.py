@@ -1080,10 +1080,21 @@ class Parser(NodeVisitor):
                                    "Valid arguments are: " +
                                    str(ValidResetTypes), node)
 
-            elif (isinstance(self.current_parent, dast.Process) and
-                  self.expr_check(KW_CONFIG, 0, 0, e, keywords=None)):
-                self.current_process.configurations.extend(
-                    self.parse_config_section(e))
+            elif self.expr_check(KW_CONFIG, 0, 0, e, keywords=None):
+                if isinstance(self.current_parent, dast.Process) or \
+                   isinstance(self.current_parent, dast.Program):
+                    self.current_parent.configurations.extend(
+                        self.parse_config_section(e))
+                elif isinstance(self.current_parent, dast.Function) and \
+                     isinstance(self.current_parent.parent, dast.Program) and \
+                     self.current_parent.name == "main":
+                    self.warn(
+                        "Configurations should be declared in "
+                        "module or process scope.", e)
+                    self.current_parent.parent.configurations.extend(
+                        self.parse_config_section(e))
+                else:
+                    self.error("Invalid context for `config'.", e)
 
             # 'yield' and 'yield from' should be statements, handle them here:
             elif type(e) is Yield:
@@ -1714,22 +1725,28 @@ class Parser(NodeVisitor):
         dapredicates = [self.visit(pred) for pred in preds]
         return dadomains, dapredicates
 
+    def parse_config_value(self, vnode):
+        value = None
+        if isinstance(vnode, Name):
+            value = vnode.id
+        elif isinstance(vnode, Num):
+            value = vnode.n
+        elif isinstance(vnode, Str) or isinstance(vnode, Bytes):
+            value = vnode.s
+        elif isinstance(vnode, Set) or isinstance(vnode, List) or \
+             isinstance(vnode, Tuple):
+            value = [self.parse_config_value(e) for e in vnode.elts]
+        elif isinstance(vnode, NameConstant):
+            value = vnode.value
+        else:
+            self.error("Invalid configuration value.", vnode)
+        return value
+
     def parse_config_section(self, node):
         res = []
         for kw in node.keywords:
             key = kw.arg
-            vnode = kw.value
-            value = None
-            if isinstance(vnode, Name):
-                value = vnode.id
-            elif isinstance(vnode, Num):
-                value = vnode.n
-            elif isinstance(vnode, Str) or isinstance(vnode, Bytes):
-                value = vnode.s
-            elif isinstance(vnode, NameConstant):
-                value = vnode.value
-            else:
-                self.error("Invalid configuration value.", vnode)
+            value = self.parse_config_value(kw.value)
             if value is not None:
                 res.append((key, value))
         return res

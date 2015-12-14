@@ -27,13 +27,19 @@ import sys
 import copy
 import os.path
 import logging
+import socket
 import importlib
+import ipaddress
 
+from collections import namedtuple
+from argparse import Namespace
 from inspect import signature, Parameter
 from functools import wraps
 
 GlobalOptions = None
+ModuleOptions = Namespace()
 CurrentProcess = None
+LocalIpAddress = None
 IncOQBaseType = None           # incoq.runtime.Type, if using incoq
 
 log = logging.getLogger(__name__)
@@ -51,6 +57,7 @@ def set_current_process(procobj):
 def set_global_options(params):
     global GlobalOptions
     GlobalOptions = params
+    hostname = socket.gethostbyname(params.host)
 
 def global_options():
     return GlobalOptions
@@ -73,7 +80,7 @@ def setup_root_logger():
     if not GlobalOptions.nolog:
         rootlog.setLevel(logging.DEBUG)
         formatter = logging.Formatter(
-            '[%(asctime)s]%(name)s:%(levelname)s: %(message)s')
+            '[%(asctime)s]%(name)s[%(process)d]:%(levelname)s: %(message)s')
         rootlog._formatter = formatter
 
         consolelvl = logging._nameToLevel[GlobalOptions.logconsolelevel.upper()]
@@ -144,7 +151,6 @@ def api(func):
     funame = func.__name__
     if api_registry.get(funame) is not None:
         return api_registry[funame]
-        #raise RuntimeError("Double definition of API function: %s" % funame)
 
     sig = signature(func)
 
@@ -196,6 +202,35 @@ def builtin(func):
     else:
         builtin_registry[funame] = func
         return func
+
+class ProcessId(namedtuple('ProcessId',
+                           'ospid, udpport, tcpport, nodeport, ipaddr')):
+
+    ###################################################
+    # Make the EndPoint behave like a Process object:
+
+    def is_alive(self):
+        if self._proc is not None:
+            return self._proc.is_alive()
+        else:
+            self._log.warn("is_alive can only be called from parent process.")
+            return self
+
+    def join(self):
+        if self._proc is not None:
+            return self._proc.join()
+        else:
+            self._log.warn("join can only be called from parent process.")
+            return self
+
+    def terminate(self):
+        if self._proc is not None:
+            return self._proc.terminate()
+        else:
+            self._log.warn("terminate can only be called from parent process.")
+            return self
+
+    ###################################################
 
 class Null(object):
     def __init__(self, *args, **kwargs): pass

@@ -33,12 +33,15 @@ import random
 import logging
 import threading
 import traceback
-import collections
 import multiprocessing
 
-from . import pattern, common, endpoint
+from argparse import Namespace
+from . import pattern, common, endpoint, config
 
 builtin = common.builtin
+
+InstanceLogFormatter = logging.Formatter(
+    '[%(asctime)s]%(name)s[%(instance)s]:%(levelname)s: %(message)s')
 
 class DistProcess(multiprocessing.Process):
     """Abstract base class for DistAlgo processes.
@@ -103,27 +106,31 @@ class DistProcess(multiprocessing.Process):
             except KeyboardInterrupt:
                 pass
 
-    def __init__(self, parent, initpipe, channel, props=None):
+    def __init__(self, node, initpipe, props=None):
         multiprocessing.Process.__init__(self)
 
         self.id = None
         self._running = False
-        self._parent = parent
+        self._node = node
         self._initpipe = initpipe
-        self._channel = channel
+
+        self._configurations = Namespace()
         self._cmdline = common.global_options()
         if props is not None:
             self._properties = props
         else:
             self._properties = dict()
 
-        self._logical_clock = None
         self._events = []
-        self._jobqueue = collections.deque()
         self._timer = None
         self._timer_expired = False
         self._lock = None
         self._setup_called = False
+
+        # Configurations:
+        self._logical_clock = None
+        self._handling = None
+        self._channel = endpoint.UdpEndPoint
 
         # Performance counters:
         self._usrtime_st = 0
@@ -133,9 +140,10 @@ class DistProcess(multiprocessing.Process):
         self._systime = 0
         self._waltime = 0
         self._is_timer_running = False
+        self._sent_msgs = 0
 
         self._dp_name = self._properties.get('name', None)
-        self._log = None
+        self._log = logging.getLogger(self.__class__.__name__)
 
         self._child_procs = []
 
@@ -175,19 +183,60 @@ class DistProcess(multiprocessing.Process):
             os.kill(cpid, signal.SIGTERM)
         sys.exit(0)
 
-    _config_object = dict()
+    def _get_config(self, key, default=None):
+        """Returns the configuration value corresponding to `key'.
 
-    @classmethod
-    def _configure(cls, **props):
-        cls._config_object.update(props)
+        Command line parameters takes highest precedence, followed by process
+        configurations, and finally module level configurations.
 
-    def _get_channel_type(self):
-        result = endpoint.UdpEndPoint
-        if 'channel' in self._get_config():
-            config = self._get_config()['channel']
-            if 'reliable' in config or 'fifo' in config:
-                result = endpoint.TcpEndPoint
-        return result
+        """
+        cmdparam = getattr(self._cmdline, key)
+        if cmdparam is not None:
+            return cmdparam
+        if hasattr(self._configurations, key):
+            return getattr(self._configurations, key)
+        try:
+            this_mod = sys.modules[self._cmdline.this_module_name]
+            if hasattr(this_mod._Configurations, key):
+                return getattr(this_mod._Configurations, key)
+        except KeyError as e:
+            self._log.error("Can not locate current module object.")
+        return default
+
+    def _init_config(self):
+        """Set configuration variables.
+
+        """
+        # Clock:
+        clock = self._get_config("clock", 'lamport').lower()
+        if clock == 'lamport':
+            self._logical_clock = 0
+        else:
+            self._log.warn("Unsupported logical clock type %s.", str(clock))
+
+        # Handling:
+        handling = self._get_config("handling", "one").lower()
+        if handling == "one":
+            self._handling = config.HandlingOne
+        elif handling == "all":
+            self._handling = config.HandlingAll
+        elif handling == "snapshot":
+            self._handling = config.HandlingSnapshot
+        else:
+            self._log.warn("Unknown handling type %s.", str(handling))
+            self._handling = config.HandlingOne
+
+        # Channel:
+        channel = self._get_config("channel", [])
+        if not isinstance(channel, list):
+            channel = [channel]
+        for prop in channel:
+            prop = prop.lower()
+            if prop == 'fifo' or prop == 'reliable':
+                self._channel = endpoint.TcpEndPoint
+            elif prop not in {'nonfifo', 'unreliable'}:
+                self._log.error("Unknown channel property %s", str(prop))
+        return
 
     def run(self):
         try:
@@ -196,21 +245,20 @@ class DistProcess(multiprocessing.Process):
                 common.set_global_options(self._cmdline)
                 common.sysinit()
 
-            signal.signal(signal.SIGTERM, self._sighandler)
+            self._init_config()
             self.id = self._channel(self._dp_name, self.__class__)
             common.set_current_process(self.id)
             pattern.initialize(self.id)
-            if hasattr(self._cmdline, 'clock') and \
-               self._cmdline.clock == 'Lamport':
-                self._logical_clock = 0
-            self._log = logging.getLogger(str(self))
+            signal.signal(signal.SIGTERM, self._sighandler)
+
             self._start_comm_thread()
             self._lock = threading.Lock()
             self._lock.acquire()
             self._wait_for_go()
 
             if not hasattr(self, '_da_run_internal'):
-                self._log.error("Process does not have entry point!")
+                self._log.error("Process class %s missing entry point!" %
+                                self.__class__.__name__)
                 sys.exit(1)
 
             result = self._da_run_internal()
@@ -239,14 +287,11 @@ class DistProcess(multiprocessing.Process):
             self._is_timer_running = False
 
     def report_times(self):
-        self._parent.send(('totalusrtime', self._usrtime), self.id)
-        self._parent.send(('totalsystime', self._systime), self.id)
-        self._parent.send(('totaltime', self._waltime), self.id)
-
-    def report_mem(self):
-        import pympler.asizeof
-        memusage = pympler.asizeof.asizeof(self) / 1024
-        self._parent.send(('mem', memusage), self.id)
+        if self._node is not None:
+            self._node.put((self.id, ('totalusrtime', self._usrtime)))
+            self._node.put((self.id, ('totalsystime', self._systime)))
+            self._node.put((self.id, ('totaltime', self._waltime)))
+            self._node.put((self.id, ('sent', self._sent_msgs)))
 
     @builtin
     def exit(self, code=0):
@@ -293,7 +338,7 @@ class DistProcess(multiprocessing.Process):
     def spawn(self, pcls, args, **props):
         """Spawns a child process"""
         childp, ownp = multiprocessing.Pipe()
-        p = pcls(self.id, childp, self._channel, props)
+        p = pcls(self._node, childp, props)
         p.daemon = True
         p.start()
 
@@ -321,7 +366,7 @@ class DistProcess(multiprocessing.Process):
         self._trigger_event(pattern.SentEvent((self._logical_clock,
                                                to, self.id),
                                               copy.deepcopy(data)))
-        self._parent.send(('sent', 1), self.id)
+        self._sent_msgs += 1
 
     def _recvmesgs(self):
         for mesg in self.id.recvmesgs():
@@ -348,7 +393,7 @@ class DistProcess(multiprocessing.Process):
     def _label(self, name, block=False, timeout=None):
         """This simulates the controlled "label" mechanism.
 
-        Currently we simply handle one event on one label call.
+        Each label marks a `yield point'.
 
         """
         # Handle performance timers first:
@@ -363,6 +408,27 @@ class DistProcess(multiprocessing.Process):
             self.output("Crashed(@label %s)" % name, logging.WARNING)
             self.exit(10)
 
+        # Handle "all" and `block' at the same time makes no sense, because it
+        # will loop forever. Only handle "all" if non-blocking:
+        if self._handling is config.HandlingAll and not block:
+            while self._process_event(False, name, timeout):
+                pass
+        elif self._handling is config.HandlingSnapshot:
+            snapshot = self._eventq.qsize()
+            while snapshot > 0 and self._process_event(block, name, timeout):
+                snapshot -= 1
+        else:
+            # Default is handling one:
+            self._process_event(block, name, timeout)
+
+    def _process_event(self, block, label=None, timeout=None):
+        """Retrieves and processes pending messages.
+
+        Parameter 'block' indicates whether to block waiting for next message
+        to come in if the queue is currently empty. 'timeout' is the maximum
+        time to wait for an event.
+
+        """
         if timeout is not None:
             if self._timer is None:
                 self._timer_start()
@@ -370,45 +436,29 @@ class DistProcess(multiprocessing.Process):
             if timeleft <= 0:
                 self._timer_end()
                 self._timer_expired = True
-                return
+                return False
         else:
-            timeleft = None
-        self._process_event(block, timeleft)
-        self._process_jobqueue(name)
+            timeleft = 0
 
-    def _process_jobqueue(self, label=None):
-        leftovers = []
-        while self._jobqueue:
-            handler, args = self._jobqueue.popleft()
-            if ((handler._labels is None or label in handler._labels) and
-                (handler._notlabels is None or label not in handler._notlabels)):
-                try:
-                    handler(**args)
-                except TypeError as e:
-                    self._log.error(
-                        "%s when calling handler '%s' with '%s': %s",
-                        type(e).__name__, handler.__name__, str(args), str(e))
-            else:
-                leftovers.append((handler, args))
-        self._jobqueue.extend(leftovers)
-
-    def _process_event(self, block, timeout=None):
-        """Retrieves one message, then process the backlog event queue.
-
-        Parameter 'block' indicates whether to block waiting for next message
-        to come in if the queue is currently empty. 'timeout' is the maximum
-        time to wait for an event.
-
-        """
         try:
-            if timeout is not None and timeout < 0:
-                timeout = 0
-            event = self._eventq.get(block, timeout)
+            event = self._eventq.get(block, timeleft)
         except queue.Empty:
-            return
+            return False
         except Exception as e:
             self._log.error("Caught exception while waiting for events: %r", e)
-            return
+            return False
+
+        self._update_logical_clock(event)
+        self._trigger_event(event, label)
+        return True
+
+    def _update_logical_clock(self, event):
+        """Update our logical clock value based on `event'.
+
+        `event' should be a received message from a remote peer.
+
+        """
+        # FIXME: currently only Lamport's clock is implemented.
 
         if isinstance(self._logical_clock, int):
             if not isinstance(event.timestamp, int):
@@ -419,13 +469,11 @@ class DistProcess(multiprocessing.Process):
                     "".format(event.timestamp))
                 return
             self._logical_clock = max(self._logical_clock, event.timestamp) + 1
-        self._trigger_event(event)
 
-    def _trigger_event(self, event):
-        """Immediately triggers 'event', skipping the event queue.
+    def _trigger_event(self, event, label=None):
+        """Immediately triggers `event'.
 
         """
-
         self._log.debug("triggering event %s" % event)
         for p in self._events:
             bindings = dict()
@@ -437,11 +485,24 @@ class DistProcess(multiprocessing.Process):
                     # Call the update stub:
                     p.record_history(getattr(self, p.name), event.to_tuple())
                 for h in p.handlers:
-                    self._jobqueue.append((h, copy.deepcopy(bindings)))
+                    if ((h._labels is None or label in h._labels) and
+                        (h._notlabels is None or label not in h._notlabels)):
+                        try:
+                            h(**copy.deepcopy(bindings))
+                        except TypeError as e:
+                            self._log.error(
+                                "%s when calling handler '%s' with '%s': %s",
+                                type(e).__name__, handler.__name__,
+                                str(args), str(e))
+                    else:
+                        self._log.debug(
+                            "Event %s for handler %s skipped due to label "
+                            "restriction.", str(event), str(h)
+                        )
 
     def _forever_message_loop(self):
         while (True):
-            self._process_event(self._events, True)
+            self._process_event(block=True, label=None, timeout=None)
 
     def __str__(self):
         s = self.__class__.__name__

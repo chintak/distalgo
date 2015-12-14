@@ -26,7 +26,7 @@ import sys
 import logging
 import argparse
 
-__version__ = "1.0.0b15"
+__version__ = "1.0.0b16"
 
 from .api import entrypoint
 from .common import set_global_options
@@ -82,6 +82,23 @@ def parseArgs():
     parser.add_argument("-c", "--compiler-flags", default="",
                         help="flags to pass to the compiler, if recompiling "
                         "is required.")
+
+    parser.add_argument("--handling", # default="one",
+                        choices=['one', 'all', 'snapshot'],
+                        help="specify the handling semantics for yield points."
+                        " Overrides configurations declared in the program.")
+    parser.add_argument("--clock", # default="None",
+                        choices=['lamport'],
+                        help="specify the logical clock type."
+                        " Overrides configurations declared in the program.")
+    parser.add_argument("--channel", # default="",
+                        choices=['fifo', 'reliable', 'nonfifo', 'unreliable'],
+                        action="append",
+                        help="specify the channel properties."
+                        " Overrides configurations declared in the program.")
+
+    parser.add_argument("-H", "--host", default='localhost',
+                        help="host name of local node; defaults to 'localhost'.")
     parser.add_argument("--start-method", default=None, choices=['fork', 'spawn'],
                         help="choose the start method for spawning child processes."
                         " 'fork' is the default method on UNIX-like systems,"
@@ -100,7 +117,8 @@ def libmain():
     variables, and calls the 'main' function of the DistAlgo program.
     """
 
-    set_global_options(parseArgs())
+    cmdparams = parseArgs()
+    set_global_options(cmdparams)
     entrypoint()
 
 def die(mesg = None):

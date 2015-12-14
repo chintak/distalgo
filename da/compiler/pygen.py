@@ -25,8 +25,10 @@
 import sys
 from ast import *
 from itertools import chain
-from . import dast
-from .utils import printd, printw, printe
+
+import da
+from da.compiler import dast
+from da.compiler.utils import printd, printw, printe
 
 OperatorMap = {
     dast.AddOp : Add,
@@ -230,12 +232,15 @@ def translate(distalgo_ast, filename="", options=None):
         raise PythonGeneratorException(str(pg.current_node)) from ex
 
 # List of arguments needed to initialize a process:
-PROC_INITARGS = ["parent", "initq", "channel", "props"]
+PROC_INITARGS = ["parent", "initq", "props"]
 
 PREAMBLE = parse(
     """
+import argparse
 import da
-    """).body
+__DA_COMPILER_VERSION__ = '%s'
+_Configurations = argparse.Namespace()
+    """ % da.__version__).body
 POSTAMBLE = parse("""
 if __name__ == "__main__":
     da.init(config)
@@ -327,9 +332,23 @@ class PythonGenerator(NodeVisitor):
 
     def visit_Program(self, node):
         self.module_args = node._compiler_options
+        self.preambles.extend([Assign(targets=
+                                      [pyAttr("_Configurations", confitem)],
+                                      value=self.generate_config_value(confval))
+                   for confitem, confval in node.configurations])
         body = []
         body.extend(self.body(node.body))
         return Module(self.preambles + body + self.postambles)
+
+    def generate_config_value(self, node):
+        if isinstance(node, str):
+            return Str(node)
+        if isinstance(node, int) or isinstance(node, float):
+            return Str(str(node))
+        if isinstance(node, list):
+            return pyList([self.generate_config_value(v) for v in node])
+        printe("Unknown config value type: %r" % node)
+        return pyNone()
 
     def generate_event_def(self, node):
         evtype = pyAttr(pyAttr("da", "pat"), node.type.__name__)
@@ -367,9 +386,13 @@ class PythonGenerator(NodeVisitor):
         events = [Expr(pyCall(func=pyAttr(pyAttr("self", "_events"), "extend"),
                               args=[pyList([self.generate_event_def(evt)
                               for evt in node.events])]))]
+        configs = [Assign(targets=[pyAttr(pyAttr("self", "_configurations"),
+                                          confitem)],
+                          value=self.generate_config_value(confval))
+                   for confitem, confval in node.configurations]
         return pyFunctionDef(name="__init__",
                              args=(["self"] + PROC_INITARGS),
-                             body=(supercall + histories + events))
+                             body=(supercall + histories + configs + events))
 
     def generate_handlers(self, node):
         """Generate the message handlers of a process."""
