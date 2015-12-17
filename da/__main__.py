@@ -96,6 +96,13 @@ def parseArgs():
                         help="highest port number for TCP and UDP protocols. "
                         "Ports for each process will be chosen randomly "
                         "between `min-port' and `max-port'.")
+    parser.add_argument("--max-connections", type=int, default=100,
+                        help="maximum number of open connections maintained "
+                        "by each process. ")
+    parser.add_argument("--tcp-buffer-size", type=int, default=1024,
+                        help="size of the TCP send buffer. This limits the "
+                        "maximum serialized size of each message, messages "
+                        "larger than this size are discarded.")
 
     parser.add_argument("--handling", # default="one",
                         choices=['one', 'all', 'snapshot'],

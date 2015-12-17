@@ -22,6 +22,7 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 # WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+import io
 import sys
 import ipaddress
 import pickle
@@ -32,6 +33,8 @@ import logging
 import threading
 
 log = logging.getLogger("Endpoint")
+
+INTEGER_BYTES = 8
 
 class Connection:
     """Represents a connection to a remote peer.
@@ -45,12 +48,23 @@ class Connection:
     def fileno(self):
         return self.sock.fileno()
 
+    def close(self):
+        self.sock.close()
+
 class PendingConnection:
     """Placeholder for a TCP socket before full protocol negotiation completes.
 
     """
     def __init__(self, sock, addr, proto):
         super().__init__(sock, addr, proto)
+
+class ProcessId:
+    """Object representing a process id.
+
+    """
+    def __init__(self, props):
+        for key in props:
+            self.__dict__[key] = props[key]
 
 class Protocol:
     """Defines a lower level transport protocol.
@@ -119,52 +133,69 @@ class TcpProtocol(Protocol):
         conn = PendingConnection(sock, addr, self)
         self._ep.register(conn)
 
-    def _negotiate(self, conn):
-        
-
     def recv(self, conn):
+        """Handles incoming data over `conn'."""
+
         if conn.sock is self.listener:
             self.accept()
-        elif isinstance(conn, PendingConnection):
-            self._negotiate(conn)
         else:
             try:
-                bytedata = self._receive_1(INTEGER_BYTES, c)
+                bytedata = self._receive_1(INTEGER_BYTES, conn.sock)
                 datalen = int.from_bytes(bytedata, sys.byteorder)
-
-                bytedata = self._receive_1(datalen, c)
-                src, tstamp, data = pickle.loads(bytedata)
-                bytedata = None
-
-                if not isinstance(src, EndPoint):
-                    raise TypeError()
+                bytedata = self._receive_1(datalen, conn.sock)
+                if isinstance(conn, PendingConnection):
+                    peerid, tstamp, data = pickle.loads(bytedata)
+                    bytedata = None
+                    newconn = Connection(conn.sock, peerid, self)
+                    self._ep.replate(conn, newconn)
+                    yield (peerid, tstamp, data)
                 else:
-                    yield (src, tstamp, data)
+                    tstamp, data = pickle.loads(bytedata)
+                    bytedata = None
+                    yield (conn.peer, tstamp, data)
 
             except pickle.UnpicklingError as e:
                 self._log.warn("UnpicklingError, packet from %s dropped",
                                TcpEndPoint.receivers[c])
-
             except socket.error as e:
                 self._log.debug("Remote connection %s terminated.",
                                 str(c))
-                self._ep.deregister(conn, self)
+                self._ep.deregister(conn)
 
-    def send(self, data, src, timestamp = 0):
+    def _receive_1(self, totallen, conn):
+        """Helper function to receive `totallen' number of bytes over
+        `conn'. 
+
+        """
+        msg = bytearray(totallen)
+        offset = 0
+        while offset < totallen:
+            recvd = conn.recv_into(memoryview(msg)[offset:])
+            if recvd == 0:
+                raise socket.error("EOF received")
+            offset += recvd
+        return msg
+
+    def send(self, data, dest, timestamp=0):
+        """Sends `data' to `dest'. """
         retry = 1
-        while True:
+        buffer = io.BytesIO(b'0' * INTEGER_BYTES)
+        for _ in range(Protocol.max_retries):
             conn = self._ep.get_connection(dest)
             if conn is None:
-                conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 try:
-                    conn.connect(self._address)
-                    TcpEndPoint.senders[self] = conn
+                    sock.connect(self._ep.decode(dest, self))
                 except socket.error:
                     self._log.debug("Can not connect to %s. Peer is down.",
                                    str(self._address))
                     return False
+                conn = Connection(sock, dest, self)
+                self._ep.register(conn)
+                bytedata = pickle.dumps((self._ep.pid, timestamp, data))
+            else:
+                bytedata = pickle.dumps((timestamp, data))
 
-            bytedata = pickle.dumps((src, timestamp, data))
             l = len(bytedata)
             header = int(l).to_bytes(INTEGER_BYTES, sys.byteorder)
             mesg = header + bytedata
@@ -194,16 +225,6 @@ class TcpProtocol(Protocol):
 
         return False
 
-    def _receive_1(self, totallen, conn):
-        msg = bytearray(totallen)
-        offset = 0
-        while offset < totallen:
-            recvd = conn.recv_into(memoryview(msg)[offset:])
-            if recvd == 0:
-                raise socket.error("EOF received")
-            offset += recvd
-        return msg
-
 PROTOCOLS = [TcpProtocol, UdpProtocol]
 
 class EndPoint:
@@ -219,7 +240,8 @@ class EndPoint:
         self._proctype = proctype
         self._log = logging.getLogger("runtime.EndPoint")
         self._address = None
-        self._connections = LRU(MAX_TCP_CONN)
+        self._connections = None
+        self._lock = None
 
     def _init_config(self):
         from . import common
@@ -227,24 +249,44 @@ class EndPoint:
         Protocol.max_retries = opts.max_retries
         Protocol.min_port = opts.min_port
         Protocol.max_port = opts.max_port
+        self._connections = LRU(opts.max_connections)
 
     def start(self):
         self._init_config()
+        self._lock = threading.RLock()
         # 1. get our IP address
         try:
             ipstr = socket.gethostbyname(self._name)
             ip = ipaddress.ip_address(ipstr)
             for proto in self.protocols:
                 port = proto.start(self, ip)
+            return True
         except socket.error as e:
             self._log.error("Unable to start endpoint: ", e)
+            return False
 
-    def register(self, conn, addr, proto):
-        connobj = Connection(conn, addr, proto)
-        self._connections[addr] = connobj
+    def register(self, conn):
+        """Adds `conn' to list of connections."""
+        with self._lock:
+            self._connections[conn.peer] = conn
+
+    def replace(self, conn, newconn):
+        """Replace `conn' with `newconn'."""
+        with self._lock:
+            del self._connections[conn.peer]
+            self._connections[newconn.peer] = newconn
+
+    def get_connection(self, pid):
+        with self._lock:
+            if pid in self._connections:
+                return self._connections[pid]
+            else:
+                return None
 
     def deregister(self, conn):
-        self._connections.remove(conn)
+        """Removes `conn' from list of connections."""
+        with self._lock:
+            del self._connections[conn.peer]
 
     def send(self, data, target, timestamp = 0):
         pass
@@ -275,8 +317,6 @@ class EndPoint:
 
 
 # TCP Implementation:
-
-INTEGER_BYTES = 8
 
 MAX_TCP_CONN = 200
 MIN_TCP_PORT = 10000
@@ -490,7 +530,6 @@ class LRU:
     def __init__(self, count, pairs=[]):
         self.count = max(count, 1)
         self.d = {}
-        self.lock = threading.RLock()
         self.first = None
         self.last = None
         for key, value in pairs:
@@ -498,44 +537,41 @@ class LRU:
     def __contains__(self, obj):
         return obj in self.d
     def __getitem__(self, obj):
-        with self.lock:
-            a = self.d[obj].me
-            self[a[0]] = a[1]
-            return a[1]
+        a = self.d[obj].me
+        self[a[0]] = a[1]
+        return a[1]
     def __setitem__(self, obj, val):
-        with self.lock:
-            if obj in self.d:
-                del self[obj]
-            nobj = Node(self.last, (obj, val))
-            if self.first is None:
-                self.first = nobj
-            if self.last:
-                self.last.next = nobj
-            self.last = nobj
-            self.d[obj] = nobj
-            if len(self.d) > self.count:
-                if self.first == self.last:
-                    self.first = None
-                    self.last = None
-                    return
-                a = self.first
-                a.next.prev = None
-                self.first = a.next
-                a.next = None
-                del self.d[a.me[0]]
-                del a
+        if obj in self.d:
+            del self[obj]
+        nobj = Node(self.last, (obj, val))
+        if self.first is None:
+            self.first = nobj
+        if self.last:
+            self.last.next = nobj
+        self.last = nobj
+        self.d[obj] = nobj
+        if len(self.d) > self.count:
+            if self.first == self.last:
+                self.first = None
+                self.last = None
+                return
+            a = self.first
+            a.next.prev = None
+            self.first = a.next
+            a.next = None
+            del self.d[a.me[0]]
+            del a
     def __delitem__(self, obj):
-        with self.lock:
-            nobj = self.d[obj]
-            if nobj.prev:
-                nobj.prev.next = nobj.next
-            else:
-                self.first = nobj.next
-            if nobj.next:
-                nobj.next.prev = nobj.prev
-            else:
-                self.last = nobj.prev
-            del self.d[obj]
+        nobj = self.d[obj]
+        if nobj.prev:
+            nobj.prev.next = nobj.next
+        else:
+            self.first = nobj.next
+        if nobj.next:
+            nobj.next.prev = nobj.prev
+        else:
+            self.last = nobj.prev
+        del self.d[obj]
     def __iter__(self):
         cur = self.first
         while cur != None:
@@ -560,10 +596,8 @@ class LRU:
     def keys(self):
         return self.d.keys()
     def get(self, k, d=None):
-        with self.lock:
-            v = self.d.get(k)
-            if v is None: return None
-            a = v.me
-            self[a[0]] = a[1]
-            return a[1]
-
+        v = self.d.get(k)
+        if v is None: return None
+        a = v.me
+        self[a[0]] = a[1]
+        return a[1]
