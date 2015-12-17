@@ -33,10 +33,33 @@ import threading
 
 log = logging.getLogger("Endpoint")
 
+class Connection:
+    """Represents a connection to a remote peer.
+
+    """
+    def __init__(self, sock, addr, proto):
+        self.sock = sock
+        self.peer = addr
+        self.proto = proto
+
+    def fileno(self):
+        return self.sock.fileno()
+
+class PendingConnection:
+    """Placeholder for a TCP socket before full protocol negotiation completes.
+
+    """
+    def __init__(self, sock, addr, proto):
+        super().__init__(sock, addr, proto)
+
 class Protocol:
     """Defines a lower level transport protocol.
 
     """
+    max_retries = 5
+    min_port = 10000
+    max_port = 65535
+
     def __init__(self, endpoint, port=None):
         self._ep = endpoint
         self.port = port
@@ -51,10 +74,11 @@ class Protocol:
         """
         pass
 
-    def send(self, msg, dest):
-        """Send `msg' to `dest'.
+    def send(self, msg, conn=None):
+        """Send `msg' through `conn'.
 
         Returns `True' if send succeeded, `False' otherwise.
+
         """
         return False
 
@@ -76,8 +100,8 @@ class TcpProtocol(Protocol):
         self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         if self.port is None:
             done = False
-            for _ in range(MAX_RETRY):
-                self.port = random.randint(MIN_TCP_PORT, MAX_TCP_PORT)
+            for _ in range(Protocol.max_retries):
+                self.port = random.randint(Protocol.min_port, Protocol.max_port)
                 try:
                     self.listener.bind((self._ep.hostname, self.port))
                     done = True
@@ -85,20 +109,24 @@ class TcpProtocol(Protocol):
                 except socket.error:
                     pass
             if not done:
-                self._log.error("Unable to bind to free port.")
                 self.listener.close()
+                raise socket.error("Unable to bind to free port.")
         else:
-            try:
-                self.listener.bind((self._ep.hostname, self.port))
-            except socket.error:
-                self._log.error("Unable to bind to port %d", self.port)
-                self.listener.close()
-        return True
+            self.listener.bind((self._ep.hostname, self.port))
+
+    def _accept(self):
+        sock, addr = self.listener.accept()
+        conn = PendingConnection(sock, addr, self)
+        self._ep.register(conn)
+
+    def _negotiate(self, conn):
+        
 
     def recv(self, conn):
-        if conn is self.listener:
-            newconn, remote_addr = self.listener.accept()
-            self._ep.register(newconn, remote_addr, self)
+        if conn.sock is self.listener:
+            self.accept()
+        elif isinstance(conn, PendingConnection):
+            self._negotiate(conn)
         else:
             try:
                 bytedata = self._receive_1(INTEGER_BYTES, c)
@@ -178,15 +206,6 @@ class TcpProtocol(Protocol):
 
 PROTOCOLS = [TcpProtocol, UdpProtocol]
 
-class Connection:
-    def __init__(self, sock, addr, proto):
-        self.sock = sock
-        self.addr = addr
-        self.proto = proto
-
-    def fileno(self):
-        return self.sock.fileno()
-
 class EndPoint:
     """Manages all communication channels for the current process.
 
@@ -202,7 +221,15 @@ class EndPoint:
         self._address = None
         self._connections = LRU(MAX_TCP_CONN)
 
+    def _init_config(self):
+        from . import common
+        opts = common.global_options()
+        Protocol.max_retries = opts.max_retries
+        Protocol.min_port = opts.min_port
+        Protocol.max_port = opts.max_port
+
     def start(self):
+        self._init_config()
         # 1. get our IP address
         try:
             ipstr = socket.gethostbyname(self._name)
@@ -245,7 +272,6 @@ class EndPoint:
             return "<" + self._proctype.__name__ + str(self) + ">"
         else:
             return "<process " + str(self) + ">"
-
 
 
 # TCP Implementation:

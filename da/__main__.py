@@ -83,6 +83,20 @@ def parseArgs():
                         help="flags to pass to the compiler, if recompiling "
                         "is required.")
 
+    parser.add_argument("--max-retries", type=int, default=5,
+                        help="maximum number of times to try binding to a port "
+                        "during protocol initialization. If a protocol fails "
+                        "to bind a port after this many retries, the process "
+                        "will terminate.")
+    parser.add_argument("--min-port", type=int, default=10000,
+                        help="lowest port number for TCP and UDP protocols. "
+                        "Each process will choose a random port number "
+                        "between `min-port' and `max-port'.")
+    parser.add_argument("--max-port", type=int, default=65535,
+                        help="highest port number for TCP and UDP protocols. "
+                        "Ports for each process will be chosen randomly "
+                        "between `min-port' and `max-port'.")
+
     parser.add_argument("--handling", # default="one",
                         choices=['one', 'all', 'snapshot'],
                         help="specify the handling semantics for yield points."

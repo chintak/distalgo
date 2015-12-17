@@ -107,7 +107,7 @@ class DistProcess(multiprocessing.Process):
                 pass
 
     def __init__(self, node, initpipe, props=None):
-        multiprocessing.Process.__init__(self)
+        super().__init__()
 
         self.id = None
         self._running = False
