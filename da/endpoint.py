@@ -24,13 +24,15 @@
 
 import io
 import sys
-import ipaddress
 import pickle
 import random
 import select
 import socket
 import logging
+import ipaddress
 import threading
+
+from collections import namedtuple
 
 log = logging.getLogger("Endpoint")
 
@@ -58,13 +60,20 @@ class PendingConnection:
     def __init__(self, sock, addr, proto):
         super().__init__(sock, addr, proto)
 
-class ProcessId:
+class ProcessId(namedtuple('ProcessId',
+                           'udpport, tcpport, nodeport, ipaddr')):
     """Object representing a process id.
 
     """
-    def __init__(self, props):
-        for key in props:
-            self.__dict__[key] = props[key]
+    @property
+    def tcp_addr(self):
+        ipaddr = ipaddress.ip_address(self.ipaddr)
+        return (str(ipaddr), self.tcpport)
+
+    @property
+    def udp_addr(self):
+        ipaddr = ipaddress.ip_address(self.ipaddr)
+        return (str(ipaddr), self.udpport)
 
 class Protocol:
     """Defines a lower level transport protocol.
@@ -107,7 +116,7 @@ class TcpProtocol(Protocol):
         super().__init__(endpoint, port)
 
     def start(self):
-        """Starts protocol.
+        """Starts the TCP listener socket.
 
         """
 
@@ -137,7 +146,7 @@ class TcpProtocol(Protocol):
         """Handles incoming data over `conn'."""
 
         if conn.sock is self.listener:
-            self.accept()
+            self._accept()
         else:
             try:
                 bytedata = self._receive_1(INTEGER_BYTES, conn.sock)
