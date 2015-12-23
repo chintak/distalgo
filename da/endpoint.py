@@ -60,20 +60,6 @@ class PendingConnection:
     def __init__(self, sock, addr, proto):
         super().__init__(sock, addr, proto)
 
-class ProcessId(namedtuple('ProcessId',
-                           'udpport, tcpport, nodeport, ipaddr')):
-    """Object representing a process id.
-
-    """
-    @property
-    def tcp_addr(self):
-        ipaddr = ipaddress.ip_address(self.ipaddr)
-        return (str(ipaddr), self.tcpport)
-
-    @property
-    def udp_addr(self):
-        ipaddr = ipaddress.ip_address(self.ipaddr)
-        return (str(ipaddr), self.udpport)
 
 class Protocol:
     """Defines a lower level transport protocol.
@@ -234,7 +220,48 @@ class TcpProtocol(Protocol):
 
         return False
 
-PROTOCOLS = [TcpProtocol, UdpProtocol]
+class ProtocolSuite:
+    """A bundle of network protocols.
+
+    Each process in the same instance of distributed program must have the
+    same ProtocolSuite.
+    """
+    def __init__(self, endpoint):
+        self._ep = endpoint
+        self.protocols = []
+
+    def start(self):
+        pass
+
+class TcpUdpSuite(ProtocolSuite):
+    def __init__(self, endpoint):
+        super().__init__(endpoint)
+        self.tcpproto = None
+        self.udpproto = None
+
+    def start(self):
+        self.tcpproto = TcpProtocol(self._ep)
+        self.udpproto = UdpProtocol(self._ep)
+        tcpport = tcp.start(self)
+        udpport = udp.start(self)
+
+    # TODO: We use a namedtuple for simplicity, but needs to be changed if we
+    # are to support process migration:
+    class ProcessId(namedtuple('ProcessId',
+                               'udpport, tcpport, nodeport, ipaddr')):
+        """Object representing a process id.
+
+        """
+        @property
+        def tcp_addr(self):
+            ipaddr = ipaddress.ip_address(self.ipaddr)
+            return (str(ipaddr), self.tcpport)
+
+        @property
+        def udp_addr(self):
+            ipaddr = ipaddress.ip_address(self.ipaddr)
+            return (str(ipaddr), self.udpport)
+
 
 class EndPoint:
     """Manages all communication channels for the current process.
@@ -259,16 +286,16 @@ class EndPoint:
         Protocol.min_port = opts.min_port
         Protocol.max_port = opts.max_port
         self._connections = LRU(opts.max_connections)
+        self.host = socket.gethostbyname(self._name)
 
     def start(self):
-        self._init_config()
-        self._lock = threading.RLock()
-        # 1. get our IP address
         try:
-            ipstr = socket.gethostbyname(self._name)
-            ip = ipaddress.ip_address(ipstr)
-            for proto in self.protocols:
-                port = proto.start(self, ip)
+            # 1. initialize configuration variables and lock object. We need
+            # to init config here in order to support the `spawn' start
+            # method
+            self._init_config()
+            self._lock = threading.RLock()
+            # 2. start the protocols:
             return True
         except socket.error as e:
             self._log.error("Unable to start endpoint: ", e)
