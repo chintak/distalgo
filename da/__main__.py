@@ -133,9 +133,11 @@ def parseArgs():
     return parser.parse_args()
 
 def libmain():
-    """
-    Main program entry point. Parses command line options, sets up global
-    variables, and calls the 'main' function of the DistAlgo program.
+    """Main program entry point.
+
+    Parses command line options, sets up global variables, and calls the
+    'main' function of the DistAlgo program.
+
     """
 
     cmdparams = parseArgs()
@@ -143,6 +145,9 @@ def libmain():
     entrypoint()
 
 def die(mesg = None):
+    """Terminate program. Optionally print error message.
+
+    """
     if mesg != None:
         sys.stderr.write(mesg + "\n")
     sys.exit(1)
