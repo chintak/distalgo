@@ -162,8 +162,12 @@ def entrypoint():
         module = import_da(basename,
                            from_dir=source_dir,
                            compiler_args=GlobalOptions.compiler_flags.split())
+        GlobalOptions.host = socket.gethostbyname(GlobalOptions.host)
     except ImportError as e:
         die("ImportError: " + str(e))
+    except socket.gaierror as e:
+        die("Unresolvable hostname " + str(GlobalOptions.host))
+
     if not (hasattr(module, 'main') and
             isinstance(module.main, types.FunctionType)):
         die("'main' function not defined!")

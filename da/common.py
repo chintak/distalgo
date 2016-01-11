@@ -27,7 +27,6 @@ import sys
 import copy
 import os.path
 import logging
-import socket
 import importlib
 import ipaddress
 
@@ -57,7 +56,6 @@ def set_current_process(procobj):
 def set_global_options(params):
     global GlobalOptions
     GlobalOptions = params
-    params.host = socket.gethostbyname(params.host)
 
 def global_options():
     return GlobalOptions
