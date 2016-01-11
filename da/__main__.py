@@ -80,8 +80,8 @@ def parseArgs():
                         help="force recompile DistAlgo source file. ",
                         action="store_true", default=False)
     parser.add_argument("-c", "--compiler-flags", default="",
-                        help="flags to pass to the compiler, if recompiling "
-                        "is required.")
+                        help="flags to pass to the compiler, if (re)compiling "
+                        "is required for any module.")
 
     parser.add_argument("--max-retries", type=int, default=5,
                         help="maximum number of times to try binding to a port "
