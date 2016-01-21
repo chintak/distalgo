@@ -26,8 +26,13 @@ import io
 import socket
 import random
 import pickle
+import logging
+
+from collections import namedtuple
 
 INTEGER_BYTES = 8
+
+log = logging.getLogger(__name__)
 
 class Connection:
     """Represents a connection to a remote peer.
@@ -39,6 +44,9 @@ class Connection:
         self.proto = proto
 
     def fileno(self):
+        """Returns the `fileno' of the socket, needed for select.
+
+        """
         return self.sock.fileno()
 
     def close(self):
@@ -53,7 +61,7 @@ class PendingConnection:
 
 
 class Protocol:
-    """Defines a lower level transport protocol.
+    """Base class for lower-level transport protocols.
 
     """
     max_retries = 5
@@ -63,8 +71,7 @@ class Protocol:
     def __init__(self, endpoint, port=None):
         self._ep = endpoint
         self.port = port
-
-        self._log = logging.getLogger(self.__class__.__name__)
+        self.started = False
 
     def start(self):
         """Starts the protocol.
@@ -99,16 +106,15 @@ class TcpProtocol(Protocol):
 
         self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         if self.port is None:
-            done = False
             for _ in range(Protocol.max_retries):
                 self.port = random.randint(Protocol.min_port, Protocol.max_port)
                 try:
                     self.listener.bind((self._ep.hostname, self.port))
-                    done = True
+                    self.started = True
                     break
                 except socket.error:
                     pass
-            if not done:
+            if not self.started:
                 self.listener.close()
                 raise socket.error("Unable to bind to free port.")
         else:

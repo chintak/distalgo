@@ -54,6 +54,12 @@ class EndPoint:
         self._lock = None       # LRU is not thread-safe
 
     def _init_config(self):
+        """Initializes global parameters.
+
+        Under 'fork' semantics, this only needs to be done once. However, to
+        support 'spawn' semantic we need to do this for every new process.
+
+        """
         from . import common
         opts = common.global_options()
         Protocol.max_retries = opts.max_retries
