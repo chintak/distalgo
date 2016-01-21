@@ -145,8 +145,6 @@ def import_da(name, from_dir=None, compiler_args=[]):
     return modobj
 
 def entrypoint():
-    global NodeQueue
-
     GlobalOptions = common.global_options()
     if GlobalOptions.start_method != \
        multiprocessing.get_start_method(allow_none=True):
@@ -179,6 +177,7 @@ def entrypoint():
     common.set_current_process(ep.EndPoint())
 
     # Start the background statistics thread:
+    global NodeQueue
     NodeQueue = multiprocessing.Queue()
     RootLock.acquire()
     stat_th = threading.Thread(target=collect_statistics,

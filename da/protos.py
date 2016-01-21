@@ -44,8 +44,9 @@ class Connection:
         self.proto = proto
 
     def fileno(self):
-        """Returns the `fileno' of the socket, needed for select.
+        """Returns the OS `fileno' of the socket.
 
+        This is needed for `select'.
         """
         return self.sock.fileno()
 

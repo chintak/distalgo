@@ -51,7 +51,8 @@ class EndPoint:
         self._log = logging.getLogger("runtime.EndPoint")
         self._address = None
         self._connections = None
-        self._lock = None       # LRU is not thread-safe
+        self._rlock, self._wlock = None, None       # LRU is not thread-safe
+        self._rcounter = 0
 
     def _init_config(self):
         """Initializes global parameters.
@@ -66,7 +67,7 @@ class EndPoint:
         Protocol.min_port = opts.min_port
         Protocol.max_port = opts.max_port
         self._connections = common.LRU(opts.max_connections)
-        self.host = socket.gethostbyname(self._name)
+        self._name = opts.host
 
     def start(self):
         try:
@@ -74,41 +75,48 @@ class EndPoint:
             # to init config here in order to support the `spawn' start
             # method
             self._init_config()
-            self._lock = threading.RLock()
+            self._rlock = threading.Lock()
+            self._wlock = threading.Rlock()
             # 2. start the protocols:
             return True
         except socket.error as e:
             log.error("Unable to start endpoint: ", e)
             return False
 
+    def _start_cache_read(self):
+        with self._rlock:
+            self._rcounter += 1
+            if self._rcounter == 1:
+                self._wlock.acquire()
+
+    def _end_cache_read(self):
+        with self._rlock:
+            self._rcounter -= 1
+            if self._rcounter == 0:
+                self._wlock.release()
+
     def register(self, conn):
         """Adds `conn' to list of connections."""
-        with self._lock:
+        with self._wlock:
             self._connections[conn.peer] = conn
 
     def replace(self, conn, newconn):
         """Replace `conn' with `newconn'."""
-        with self._lock:
+        with self._wlock:
             del self._connections[conn.peer]
             self._connections[newconn.peer] = newconn
 
     def get_connection(self, pid):
-        with self._lock:
-            if pid in self._connections:
-                return self._connections[pid]
-            else:
-                return None
+        self.start_cache_read()
+        if pid in self._connections:
+            return self._connections[pid]
+        else:
+            return None
 
     def deregister(self, conn):
         """Removes `conn' from list of connections."""
-        with self._lock:
+        with self._wlock:
             del self._connections[conn.peer]
-
-    def send(self, data, target, timestamp = 0):
-        pass
-
-    def recv(self, block, timeout = None):
-        pass
 
     def recvmesgs(self):
         try:
