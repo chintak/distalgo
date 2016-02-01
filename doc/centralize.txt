@@ -1,0 +1,607 @@
+﻿l -> yp
+l or label: label name in code; l is ok
+yp or ypoint: state variable holding the current label
+lstate -> vstate: done
+TERMINOLOGY: state is a pair of yield point yp (identified by a label) and vstate
+change mixed case to underscores
+add option for when channel is not FIFO[a]
+add self as method argument
+
+
+               CENTRALIZE AND SEQUENTIALIZE DISTALGO
+
+
+                        Scott D. Stoller
+                          30 jan 2016
+
+
+this transformation translates a DistAlgo program into a centralized
+sequential program suitable for simulation or verification.
+
+
+------------------------------------------------------------
+ASSUMPTIONS
+
+
+1. process references are passed by reference in messages. other processes
+can use process references only as identifiers; other processes cannot
+directly access fields of or invoke methods of other processes. to enforce
+this, we impose the following restriction on programs: on process-typed
+variables other than self, the only dereference allowed is calling “setup”
+and then “start” after the process is created by “new”. this restriction
+is slightly conservative (e.g., one can not allow self to a variable and
+then access a field of the variable) but simple, easy to check, and usually
+satisfied. (to add RPC later, we can have a preprocessing to translate RPCs
+to sending arguments and waiting for results as messages. doing
+centralization after that is equivalent to doing normal method calls except
+with copying of arguments and results.)
+
+
+2. object references other than process references are passed by value in
+messages; in other words, the objects are copied.
+
+
+3. all uses of "self" are explicit, as required in Python, even though
+DistAlgo allows some implicit occurrences of "self".
+
+
+4. all yield points are explicit.  in other words, every await statement is
+preceded by a label.
+
+
+------------------------------------------------------------
+LIMITATIONS
+
+
+1. the program may not use Python global (i.e., module-scope) variables. if
+it did occur in the DistAlgo processes, the intended semantics is unclear;
+probably each process should have its own copy of those variables.
+
+
+2. yield points (explicit or implicit) may occur only in run(), not in
+message handlers or other methods.  to help satisfy this requirement, yield
+points can be eliminated from non-recursive methods other than run() by
+inlining those methods in run().  if yield points occurred in methods other
+than run(), then it would be necessary to explicitly save and restore the
+process's call stack when switching to and from the scheduler. if yield
+points occurred in message handlers, then it would be necessary to
+explicitly save and restore the process's stack of message handler
+invocations[c] when switching to and from the scheduler.  this is possible but
+complicated (cf. Xuetian's translation to TLA), and we do not have
+motivating examples for it.
+
+
+3. yield points may occur within a single while-loop, but not within[d] other
+control structures (e.g,, not in nested loops or branches of conditionals).
+this restriction is inessential but simplifies the translation.  it is
+compatible with the examples in the current DistAlgo distribution (lamutex
+contains a yield point in a for-loop, but it can easily be converted to a
+while-loop).
+
+
+4. processes are created only in the top-level main() method of the program
+and in run() methods of process classes.  this restriction is inessential
+but avoids the need to pass a reference to the set of processes to other
+methods that might create processes.
+
+
+5. the translation does not model real-time.  timeouts in await statements
+are simply allowed to occur non-deterministically.
+
+
+6. Non-determinism is expressed using "functions" with names starting with
+"nondet".  for example, nondetChoose(S) returns a non-deterministically
+selected element of set S.  to translate this to a language without
+non-determinism, the translated program should be augmented with an
+argument "int[] nondet" containing values used to resolve non-deterministic
+choices.  this argument and the index of which element to use for the next
+nondeterministic choice (or, alternatively, just a suffix of this argument)
+need to be passed to functions that call non-deterministic functions.  this
+requires straightforward but distracting plumbing.
+
+
+------------------------------------------------------------
+TARGET LANGUAGE
+
+
+we use Python-like syntax for the target language.  we try to use only
+language constructs available in Dafny, with the exception of tuple pattern
+matching.  for example, the translation does not introduce break
+statements, continue statements, return statements, module-scope variables,
+or class-scope variables, because Dafny does not support them.
+
+
+the translated code uses the following notation for tuple pattern matching:
+
+
+    if val of pattern:
+      s
+
+
+the meaning is: if val matches pattern, then bind the pattern variables
+based on the matching and execute statement s.
+
+
+Dafny does not have tuple pattern matching, although it has ML-like pattern
+matching for inductively defined datatypes.
+
+
+------------------------------------------------------------
+NOTATION
+
+
+the translation is expressed as 
+
+
+[[originalCode]] (args) = translatedCode,
+
+
+where args are additional arguments (if any) to the translation function.
+when no additional arguments are needed, we omit the parentheses.
+
+
+[[...]] is overloaded, representing different translation functions
+depending on the syntactic category of the original code, including
+[[class]], [[method]], [[message handler]], [[label statement]], and
+[[statement]].
+
+
+translatedCode contains meta-variables, bound when matching originalCode,
+and ordinary variables in the target language.  they can be distinguished
+by the fact that the meta-variables appear in the pattern for originalCode,
+and the latter do not.  in a nicely formatted version, we would use
+different fonts for them.
+
+
+we implicitly assume that variables are renamed to avoid collisions between
+variables in originalCode and variables introduced by the translation.
+
+
+we implicitly assume that methods are renamed to avoid collisions between
+methods in originalCode and methods introduced by the translation (e.g.,
+handle(), scheduler(), send()).
+
+
+the translation uses a few conditions and functions that need to be
+evaluated at translation time.  our notation for these is reminiscent of C
+macros.  for example:
+
+
+#IF condition on the original program
+translatedCode1
+#ELSE
+translatedCode2
+#ENDIF
+
+
+#LOCALVARS(m) returns a tuple of the local vars of method m
+
+
+------------------------------------------------------------
+[[class]]
+
+
+# translation of a process class
+# note: nm = number of methods.  nh = number of receive handlers.
+[[class p extends process: method_1 ... method_nm handler_1 .. handler_nh]]
+=
+class p extends process:
+
+
+#IF this class uses sent sequence
+self.sent = []
+#ENDIF
+
+
+#IF this class uses received sequence
+self.received = []
+#ENDIF
+
+
+# incoming is a dictionary that maps a process q to a list of messages in
+# transit from q to this process, with the oldest message at the head, and
+# the newest message at the tail.
+self.incoming = {}
+
+
+# translations of existing methods
+[[method_1]]
+...
+[[method_nm]]
+
+
+# methods added by the translation
+
+
+# handle messages at yield point yp.
+def handle(self, yp):
+  # for each non-empty incoming channel, non-deterministically select the
+  # number of in-transit messages that have arrived and must be handled at
+  # this yield point.
+  for p, chan in self.incoming:
+    if len(chan) > 0:
+      #IF the program configuration is "handling = one"
+        n = nondetChoose({0,1})
+      #ELSE
+        n = nondetChoose(range(0, len(chan)))
+      #ENDIF
+      if n > 0:
+        # msgs = sequence of arrived messages from p
+        msgs = chan[0..n-1]
+        # remove arrived messages from the channel
+        del chan[0..n-1]
+        for m in msgs:
+          #IF the channel configuration does not include "reliable"
+          msgLoss = nondetChoose({true,false})
+          if not msgLoss:
+            self.handle(yp, m, p)
+
+
+# handle message m from process p at yield point yp.
+def handle(self, yp, m, p):
+  #IF received sequence is used in this class
+  self.received.append((deepcopy(m), p))
+  #ENDIF
+  # try to receive m using each message handler, in non-deterministic order
+  ihs = nondetPermutation(range(1, nh))
+  for i in ihs:
+    self.handle(yp, m, p, i)
+
+
+# handle message m from process p at yield point yp using the i'th message
+# handler, if possible.  the translation of message handlers is defined
+# below.  note: this "dispatch" function is needed in order to invoke
+# message handlers in a non-deterministic order.
+def handle(self, yp, m, p, i):
+  if i==1: 
+    [[handler_1]]
+  ...
+  if i==nh:
+    [[handler_nh]]    
+
+
+------------------------------------------------------------
+[[method]]: translation of top-level main method of the program
+
+
+# translation of top-level main() method of the program (not part of any class).
+[[def main(): s]]
+=
+def main():
+  newprocesses = {}
+  [[s]]
+  scheduler(newprocesses);
+
+
+def scheduler(processes):
+  # create a dictionary that maps each process to its initial state.  a
+  # process state is a pair (yp, vs) where yp is a yield point of the
+  # process or "start", and vs is a tuple of values of the local variables
+  # of the process (or null if the process is at "start").
+  state = {p : ("start", null) for p in processes}
+
+
+  while processes != {}
+    # non-deterministically select a process to execute.
+    p = nondetChoose(processes)
+    (yp, vstate, newprocesses) = p.run(p.state[0], p.state[1])
+    if (yp == "end"):
+      processes.remove(p)
+      state.remove(p)
+    else:
+      state[p] = (yp, vstate)
+      # handle messages
+      p.handle(yp)
+    processes |= newprocesses
+
+
+------------------------------------------------------------
+[[method]]: translation of methods in classes
+
+
+# translation of setup()
+[[def setup(v_1,...,v_n): s]]
+=
+def setup(self,v_1,...,v_n):
+self.v_1 = v_1
+...
+self.v_n = v_n
+[[s]]
+
+
+# translation of run() in a process class, if run() does not contain a
+# loop with yield points.  in this case, the method body is an alternating
+# sequence of statements and yield points.
+# if run() starts with a yield point, consider s_0 to be "pass".
+[[def run(): s_0; l_1 s_1; ...; l_n s_n]]
+=
+# resume execution of this process at yield point yp in local state vstate.
+# yp is a label in run() or "start".
+# when execution reaches the next yield point, return that yield point (or
+# "end", if the method has terminated), the current local state, and the 
+# set of newly created processes.
+def run(self, yp, vstate):
+  # set of newly created processes
+  newprocesses = {}
+  # done is initially false.  it is set to true when execution has reached
+  # the next yield point or the end of the method.
+  done = false
+  if yp != "start":
+    # restore the local state
+    #LOCALVARS(run) = vstate
+  [["start" s_0]] (l_1)
+  [[l_1 s_1]] (l_2)
+  ...
+  [[l_n s_n]] ("end")
+  return (yp, #LOCALVARS(run), newprocesses)
+
+
+# translation of run() in a process class, if run() contains a loop with
+# yield points.  meta-variables s_{1,i}, s_{2,i}, and s_{3,i} match
+# statements before, in, and after the loop, respectively.  similarly for
+# labels.
+[[def run(): 
+  s_{1,0}; l_{1,1} s_{1,1}; ...; l_{1,n1} s_{1,n1}
+  while e:
+    s_{2,0}; l_{2,1} s_{2,1}; ...; l_{2,n2} s_{2,n2}
+  s_{3,0}; l_{3,1} s_{3,1}; ...; l_{3,n3} s_{3,n3}
+]]
+=
+# resume execution of this process at yield point yp in local state vstate.
+# yp is a label in run() or "start".
+# when execution reaches the next yield point, return that yield point (or
+# "end", if the method has terminated), the current local state, and the
+# set of newly created processes.
+def run(self, yp, vstate):
+  # set of newly created processes
+  newprocesses = {}
+  # done is initially false.  it is set to true when execution has reached
+  # the next yield point or the end of the method.
+  done = false
+  if yp != "start":
+    # restore the local variable state
+    #LOCALVARS(run) = vstate
+  [["start" s_1,0]] (l_{1,1})
+  [[l_{1,1} s_{1,1}]] (l_{1,2})
+  ...
+  [[l_{1,n1-1} s_{1,n1-1}]] (l_{1,n1})
+  # the entry point of the loop is handled specially
+  if yp == l_{1,n1} and not done:
+    [[s_{1,n_1}]]
+    if e:
+      [[s_{2,0}]]
+      yp = l_{2,1}
+    else:
+      [[s_{3,0}]]
+       yp = l_{3,1}
+    done = true
+  # statements in the middle of the loop body are handled in the usual way
+  [[l_{2,1} s_{2,1}]] (l_{2,2})
+  ...
+  [[l_{2,n2-1} s_{2,n2-1}]] (l_{2,n2})
+  # the last statement in the loop is handled specially
+  if yp == l_{2,n2} and not done:
+    [[s_{2,n2}]]
+    if e:
+      [[s_{2,0}]]
+      yp = l_{2,1}
+    else:
+      [[s_{3,0}]]
+       yp = l_{3,1}
+    done = true
+  # statements after the loop are handled in the usual way
+  [[l_{3,1} s_{3,1}]] (l_{3,2})
+  ...
+  [[l_{3,n3} s_{3,n3}]] ("end")
+  return (yp, #LOCALVARS(run), newprocesses)
+
+
+# translation of a method other than run() or setup()
+#IF m is not run() or setup()
+[[def m(vs): s]]
+=
+def m(self, vs): 
+  [[s]]
+#ENDIF
+
+
+------------------------------------------------------------
+[[label statement]] (label)
+
+
+# [[l s]] (l') = translation of statement s with label l, and with l' as the
+# label of the next statement after s.  this is an auxiliary function used
+# in the translation of run().
+
+
+# translation of await statement without timeout
+[[l await e_1 : s_1 or ... or e_n : s_n]] (l')
+=
+if yp == l and not done:
+  # non-deterministically select a true clause, if any.
+  # set S contains the indices of true clauses
+  S = {}
+  if e_1: S.add(1)
+  ...
+  if e_n: S.add(n)
+  # if there are no true clauses, there is nothing to do: we leave yp
+  # unchanged, and the process busy-waits
+  if S != {}:
+    i = nondetChoose(S)
+    if i==1: 
+      [[s_1]]
+    ..
+    if i==n: 
+      [[s_n]]
+    yp = l'
+  done = true
+
+
+# translation of await statement with timeout
+[[l await e_1 : s_1 or ... or e_n : s_n timeout(t) : s]] (l')
+=
+[[l await e_1 : s_1 or ... or e_n : s_n or true : s]] (l')
+
+
+# specialized translation of await statement with one clause.
+# the general translation above works fine in this case, but
+# this specialized translation produces simpler code.
+[[l await e : s]] (l')
+=
+if yp == l and not done:
+  if e:
+    [[s]]
+    yp = l'
+  done = true
+
+
+# translation of statement other than await
+[[l s]] (l')
+=
+#IF s is not await
+if yp == l and not done:
+  [[s]]
+  yp = l'
+  done = true
+#ENDIF
+
+
+------------------------------------------------------------
+[[statement]]
+
+
+# translation of send to a single process.
+# note that "self" identifies the current process, i.e., the sender.
+[[send m to p]] 
+= 
+send(m, p)
+
+
+# send m to p
+def send(m, p):
+  if self not in p.incoming.keys():
+    p.incoming[self] = []
+  #IF m is guaranteed not to contain mutable objects other than processes
+  p.incoming[self].append(m)
+  #IF sent sequence is used in this class
+  self.sent.append((m,p))
+  #ENDIF
+  #ELSE  # m might contain mutable objects other than processes
+  p.incoming[self].append(deepcopy(m))
+  #IF sent sequence is used in this class
+  self.sent.append((deepcopy(m),p)
+  #ENDIF
+  #ENDIF
+
+
+# translation of send to a set of processes
+[[send m to ps]] 
+= 
+for p in ps:
+  send(m,p)
+
+
+# deepcopy(v) returns a deep copy of v except that processes are not
+# copied.  processes can be identified by type.  an alternative is to pass
+# the set of processes as an argument to this function.
+def deepcopy(v):
+ ...
+
+
+# process creation without multiplicity or at-clause
+# process creation always occurs in a scope with a local variable
+# newprocesses containing the set of newly created processes.
+[[v = new P]]
+= 
+v = new P
+newprocesses.add(v)
+
+
+# process creation with multiplicity and without at-clause
+[[v = n new P]]
+= 
+v = {new P for i in range(1,n)}
+# the following Python is equivalent to newprocesses.addAll(v) in Java
+newprocesses |= v
+
+
+# process creation with multiplicity and with at-clause.  ignore the
+# at-clause, because it does not affect the semantics of the program, in
+# our abstraction.
+[[v = n new P at node]]
+=
+[[v = n new P]]
+
+
+# process creation without multiplicity and with at-clause.
+[[v = new P at node]]
+=
+[[v = new P]]
+
+
+# for other basic statements, this translation is the identity function.
+# example:
+[[v = e]] 
+= 
+v = e
+
+
+# for compound statements, this translation preserves the top-level
+# structure and recursively applies this translation to the sub-statements.
+# examples:
+[[if e: s1 else: s2]] 
+= 
+if e: [[s1]] else: [[s2]]
+
+
+[[s1; s2]]
+=
+[[s1]]; [[s2]]
+
+
+[[while e: s]]
+=
+while e: [[s]]
+
+
+------------------------------------------------------------
+[[message handler]]
+
+
+# handler with at-clause.  the translated code is always used in a scope
+# with variables l, m, and p containing the label of the current yield
+# point, the received message, and the sender of the received message,
+# respectively.
+[[receive e_1 from p_1, ..., e_n from p_n at labels : s]]
+=
+if l in labels:
+  # use the "done" variable to ensure that s is executed only once, even if 
+  # multiple patterns e_i match m.  if the handler has a single at-clause,
+  # the "done" variable can be omitted.
+  done = false
+  if (m,p) of (e_1, p_1) and not done:
+    [[s_1]]
+    done = true
+  ...
+  if (m,p) of (e_n, p_n) and not done:
+    [[s_n]]
+    done = true
+
+
+# receive without at-clause
+[[receive e_1 from p_1, ..., e_n from p_n : s]]
+=
+same as for receive with at-clause, except omit "if l in labels:"
+
+
+------------------------------------------------------------
+Bo’s thesis contains translation of
+queries with tuple patterns to comprehensions without tuple patterns,
+message patterns in handlers to if statements,
+witness of existential quantifications into queries plus retrievals
+
+
+[a]on the contrary, add option for when channel *is* FIFO
+[b]definitely
+[c]each process doesn't have a handle on message queue where it believes the end is?
+[d]theoretically or from an implementation POV
