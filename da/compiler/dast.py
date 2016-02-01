@@ -1883,8 +1883,7 @@ class SimpleStmt(Statement):
                             if getattr(self, field_name) is not None]))
 
 class CompoundStmt(Statement):
-    """Block statements are compound statements that contain one or more blocks of
-    sub-statements.
+    """Statements that contain one or more blocks of sub-statements.
 
     """
     _fields = ["body"]
@@ -1908,8 +1907,23 @@ class CompoundStmt(Statement):
         return list(chain(*[l.ordered_nameobjs for l in self.body
                             if l is not None]))
 
+    @property
+    def is_atomic(self):
+        """True if the body of this compound statement is in one atomic block.
+
+        A block of statements is atomic iff all its statements has no labels,
+        and recursively all its sub-compound statements are atomic.
+        """
+        for s in self.body:
+            if s.label is not None:
+                return False
+            elif isinstance(s, CompoundStmt) and not s.is_atomic:
+                return False
+        return True
+
 class Program(CompoundStmt, NameScope):
     """The global NameScope.
+
     """
 
     _fields = ['processes', 'entry_point'] + \
