@@ -42,12 +42,14 @@ class P(DistProcess):
                 c = logical_clock()
                 send(('request', c, self.id), to= s)
                 q.add(('request', c, self.id))
-                yp = 'label1'
+                yp = '_st_label1'
+                done = True
             except StopIteration:
                 send(('done', self.id), to= s)
-                yp = 'label2'
+                yp = '_st_label2'
+                done = True
 
-        if yp == 'label1' and not done:
+        if yp == '_st_label1' and not done:
             # await(each(('request', c2, p) in q,
             #            has= (c2, p)==(c, self.id) or (c, self.id) < (c2, p)) and
             #       each(p in s, has= some(received(('ack', c2, _p)), has=
@@ -81,14 +83,16 @@ class P(DistProcess):
             if (UniversalOpExpr_0() and UniversalOpExpr_1()):
                 _st_label_10 += 1
 
-            -- critical_section
-            task()
-            -- release
-            q.remove(('request', c, self.id))
-            send(('release', logical_clock(), self.id), to= s)
+            if yp == 'critical_section' and not done:
+                task()
+                done = True
+            if yp == 'release' and not done:
+                q.remove(('request', c, self.id))
+                send(('release', logical_clock(), self.id), to= s)
 
         send(('done', self.id), to= s)
-        await(each(p in s, has= received(('done', p))))
+        if yp == "_st_label_2"
+        # await(each(p in s, has= received(('done', p))))
         output('terminating')
 
 def scheduler(processes):
@@ -124,6 +128,28 @@ def main():
 
     scheduler(newprocesses)
 
+# Scheduler
+def scheduler(processes):
+    """Process scheduler.
+
+    A program run is divided into 'turns'. Each turn, a process is
+    non-deterministically chosen from the set of active processes. The chosen
+    process is run until it reaches the next yield point, which it returns along
+    with a snapshot of its local states.
+
+    """
+    state = {p : ('start', None) for p in processes}
+
+    while processes:
+        p = nondetChoose(processes)
+        yp, vstate, newprocesses = p.run(*state[p])
+        if yp == 'end':
+            processes.remove(p)
+            del state[p]
+        else:
+            state[p] = (yp, vstate)
+            p.handle(yp)
+        processes.update(newprocesses)
 
 # Non-determinism support routines
 import random

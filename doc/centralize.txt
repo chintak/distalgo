@@ -1,18 +1,8 @@
-﻿l -> yp
-l or label: label name in code; l is ok
-yp or ypoint: state variable holding the current label
-lstate -> vstate: done
-TERMINOLOGY: state is a pair of yield point yp (identified by a label) and vstate
-change mixed case to underscores
-add option for when channel is not FIFO[a]
-add self as method argument
-
-
-               CENTRALIZE AND SEQUENTIALIZE DISTALGO
+﻿CENTRALIZE AND SEQUENTIALIZE DISTALGO
 
 
                         Scott D. Stoller
-                          30 jan 2016
+                          2016-02-06
 
 
 this transformation translates a DistAlgo program into a centralized
@@ -53,9 +43,7 @@ preceded by a label.
 LIMITATIONS
 
 
-1. the program may not use Python global (i.e., module-scope) variables. if
-it did occur in the DistAlgo processes, the intended semantics is unclear;
-probably each process should have its own copy of those variables.
+1. the program may not use Python global (i.e., module-scope) variables.  if such variables occurred in DistAlgo processes, the intended semantics would need to be defined.
 
 
 2. yield points (explicit or implicit) may occur only in run(), not in
@@ -66,12 +54,12 @@ than run(), then it would be necessary to explicitly save and restore the
 process's call stack when switching to and from the scheduler. if yield
 points occurred in message handlers, then it would be necessary to
 explicitly save and restore the process's stack of message handler
-invocations[c] when switching to and from the scheduler.  this is possible but
+invocations[a][b] when switching to and from the scheduler.  this is possible but
 complicated (cf. Xuetian's translation to TLA), and we do not have
 motivating examples for it.
 
 
-3. yield points may occur within a single while-loop, but not within[d] other
+3. yield points may occur within a single while-loop, but not within[c][d] other
 control structures (e.g,, not in nested loops or branches of conditionals).
 this restriction is inessential but simplifies the translation.  it is
 compatible with the examples in the current DistAlgo distribution (lamutex
@@ -90,14 +78,16 @@ are simply allowed to occur non-deterministically.
 
 
 6. Non-determinism is expressed using "functions" with names starting with
-"nondet".  for example, nondetChoose(S) returns a non-deterministically
-selected element of set S.  to translate this to a language without
-non-determinism, the translated program should be augmented with an
-argument "int[] nondet" containing values used to resolve non-deterministic
-choices.  this argument and the index of which element to use for the next
-nondeterministic choice (or, alternatively, just a suffix of this argument)
-need to be passed to functions that call non-deterministic functions.  this
-requires straightforward but distracting plumbing.
+"nondet". for example, nondetChoose(S) returns a non-deterministically
+selected element of set S, and nondetChooseList(S,n) returns n
+non-deterministically selected elements of set S in non-deterministic order.
+to translate these constructs to a language without non-determinism, the
+translated program should be augmented with an argument "int[] nondet"
+containing values used to resolve non-deterministic choices. this argument
+and the index of which element to use for the next nondeterministic choice
+(or, alternatively, just a suffix of this argument) need to be passed to
+functions that call non-deterministic functions. this requires
+straightforward but distracting plumbing.
 
 
 ------------------------------------------------------------
@@ -174,7 +164,12 @@ translatedCode2
 #ENDIF
 
 
-#LOCALVARS(m) returns a tuple of the local vars of method m
+#LOCALVARS(m, yp) returns a tuple of the local variables of method m that
+are in scope at yield point yp.
+
+
+we use mixed case in identifiers, to avoid confusion with the use of
+underscore to indicate subscripts.
 
 
 ------------------------------------------------------------
@@ -218,7 +213,7 @@ def handle(self, yp):
   # for each non-empty incoming channel, non-deterministically select the
   # number of in-transit messages that have arrived and must be handled at
   # this yield point.
-  for p, chan in self.incoming:
+  for (p, chan) in self.incoming.items():
     if len(chan) > 0:
       #IF the program configuration is "handling = one"
         n = nondetChoose({0,1})
@@ -226,10 +221,17 @@ def handle(self, yp):
         n = nondetChoose(range(0, len(chan)))
       #ENDIF
       if n > 0:
-        # msgs = sequence of arrived messages from p
+        # msgs = sequence of messages from p to handle now
+        #IF channel configuration includes FIFO
         msgs = chan[0..n-1]
         # remove arrived messages from the channel
         del chan[0..n-1]
+        #ELSE  # channel is not FIFO
+        S = nondetChooseList(range(0, len(chan)), n)
+        msgs = [chan[i] for i in S]
+        for i in S: 
+          del chan[i]
+        #ENDIF
         for m in msgs:
           #IF the channel configuration does not include "reliable"
           msgLoss = nondetChoose({true,false})
@@ -268,23 +270,23 @@ def handle(self, yp, m, p, i):
 [[def main(): s]]
 =
 def main():
-  newprocesses = {}
+  startedProcesses = {}
   [[s]]
-  scheduler(newprocesses);
+  scheduler(startedProcesses);
 
 
 def scheduler(processes):
   # create a dictionary that maps each process to its initial state.  a
-  # process state is a pair (yp, vs) where yp is a yield point of the
-  # process or "start", and vs is a tuple of values of the local variables
+  # process state is a pair (yp, vstate) where yp is a yield point of the
+  # process or "start", and vstate is a tuple of values of the local variables
   # of the process (or null if the process is at "start").
   state = {p : ("start", null) for p in processes}
 
 
-  while processes != {}
+  while len(processes) > 0
     # non-deterministically select a process to execute.
     p = nondetChoose(processes)
-    (yp, vstate, newprocesses) = p.run(p.state[0], p.state[1])
+    (yp, vstate, startedProcesses) = p.run(p.state[0], p.state[1])
     if (yp == "end"):
       processes.remove(p)
       state.remove(p)
@@ -292,7 +294,7 @@ def scheduler(processes):
       state[p] = (yp, vstate)
       # handle messages
       p.handle(yp)
-    processes |= newprocesses
+    processes |= startedProcesses
 
 
 ------------------------------------------------------------
@@ -300,9 +302,9 @@ def scheduler(processes):
 
 
 # translation of setup()
-[[def setup(v_1,...,v_n): s]]
+[[def setup(self, v_1, ..., v_n): s]]
 =
-def setup(self,v_1,...,v_n):
+def setup(self, v_1, ..., v_n):
 self.v_1 = v_1
 ...
 self.v_n = v_n
@@ -313,7 +315,7 @@ self.v_n = v_n
 # loop with yield points.  in this case, the method body is an alternating
 # sequence of statements and yield points.
 # if run() starts with a yield point, consider s_0 to be "pass".
-[[def run(): s_0; l_1 s_1; ...; l_n s_n]]
+[[def run(self): s_0; l_1 s_1; ...; l_n s_n]]
 =
 # resume execution of this process at yield point yp in local state vstate.
 # yp is a label in run() or "start".
@@ -321,26 +323,26 @@ self.v_n = v_n
 # "end", if the method has terminated), the current local state, and the 
 # set of newly created processes.
 def run(self, yp, vstate):
-  # set of newly created processes
-  newprocesses = {}
+  # processes started during this scheduling quantum
+  startedProcesses = {}
   # done is initially false.  it is set to true when execution has reached
   # the next yield point or the end of the method.
   done = false
   if yp != "start":
     # restore the local state
-    #LOCALVARS(run) = vstate
+    #LOCALVARS(run, yp) = vstate
   [["start" s_0]] (l_1)
   [[l_1 s_1]] (l_2)
   ...
   [[l_n s_n]] ("end")
-  return (yp, #LOCALVARS(run), newprocesses)
+  return (yp, #LOCALVARS(run, yp), startedProcesses)
 
 
 # translation of run() in a process class, if run() contains a loop with
 # yield points.  meta-variables s_{1,i}, s_{2,i}, and s_{3,i} match
 # statements before, in, and after the loop, respectively.  similarly for
 # labels.
-[[def run(): 
+[[def run(self): 
   s_{1,0}; l_{1,1} s_{1,1}; ...; l_{1,n1} s_{1,n1}
   while e:
     s_{2,0}; l_{2,1} s_{2,1}; ...; l_{2,n2} s_{2,n2}
@@ -353,14 +355,14 @@ def run(self, yp, vstate):
 # "end", if the method has terminated), the current local state, and the
 # set of newly created processes.
 def run(self, yp, vstate):
-  # set of newly created processes
-  newprocesses = {}
+  # processes started during this scheduling quantum
+  startedProcesses = {}
   # done is initially false.  it is set to true when execution has reached
   # the next yield point or the end of the method.
   done = false
   if yp != "start":
     # restore the local variable state
-    #LOCALVARS(run) = vstate
+    #LOCALVARS(run, yp) = vstate
   [["start" s_1,0]] (l_{1,1})
   [[l_{1,1} s_{1,1}]] (l_{1,2})
   ...
@@ -373,7 +375,7 @@ def run(self, yp, vstate):
       yp = l_{2,1}
     else:
       [[s_{3,0}]]
-       yp = l_{3,1}
+      yp = l_{3,1}
     done = true
   # statements in the middle of the loop body are handled in the usual way
   [[l_{2,1} s_{2,1}]] (l_{2,2})
@@ -387,20 +389,20 @@ def run(self, yp, vstate):
       yp = l_{2,1}
     else:
       [[s_{3,0}]]
-       yp = l_{3,1}
+      yp = l_{3,1}
     done = true
   # statements after the loop are handled in the usual way
   [[l_{3,1} s_{3,1}]] (l_{3,2})
   ...
   [[l_{3,n3} s_{3,n3}]] ("end")
-  return (yp, #LOCALVARS(run), newprocesses)
+  return (yp, #LOCALVARS(run, yp), startedProcesses)
 
 
-# translation of a method other than run() or setup()
+# translation of a method other than run(), setup(), or start()
 #IF m is not run() or setup()
-[[def m(vs): s]]
+[[def m(vars): s]]
 =
-def m(self, vs): 
+def m(vars): 
   [[s]]
 #ENDIF
 
@@ -426,7 +428,7 @@ if yp == l and not done:
   if e_n: S.add(n)
   # if there are no true clauses, there is nothing to do: we leave yp
   # unchanged, and the process busy-waits
-  if S != {}:
+  if len(S) > 0:
     i = nondetChoose(S)
     if i==1: 
       [[s_1]]
@@ -509,20 +511,17 @@ def deepcopy(v):
 
 
 # process creation without multiplicity or at-clause
-# process creation always occurs in a scope with a local variable
-# newprocesses containing the set of newly created processes.
+
+
 [[v = new P]]
 = 
 v = new P
-newprocesses.add(v)
 
 
 # process creation with multiplicity and without at-clause
 [[v = n new P]]
 = 
 v = {new P for i in range(1,n)}
-# the following Python is equivalent to newprocesses.addAll(v) in Java
-newprocesses |= v
 
 
 # process creation with multiplicity and with at-clause.  ignore the
@@ -537,6 +536,21 @@ newprocesses |= v
 [[v = new P at node]]
 =
 [[v = new P]]
+
+
+# translation of pexp.start (ideal syntax) or start(pexp) (python syntax).
+# add pexp to the set of newly started processes.  the translated code always occurs
+# in a scope containing a local variable startedProcesses.  pexp may be a process
+# or set of processes.  for Dafny as the target language, this needs to be resolved
+# statically.  for Python as the target language, if this can’t be resolved statically.
+# the generated code should contain: tmp = pexp; if isinstance(tmp, set): … else: ...
+[[pexp.start()]]
+=
+#IF pexp is a set
+startedProcesses |= pexp
+#ELSE
+startedProcesses.add(pexp)
+#ENDIF
 
 
 # for other basic statements, this translation is the identity function.
@@ -569,12 +583,12 @@ while e: [[s]]
 
 
 # handler with at-clause.  the translated code is always used in a scope
-# with variables l, m, and p containing the label of the current yield
+# with variables yp, m, and p containing the label of the current yield
 # point, the received message, and the sender of the received message,
 # respectively.
 [[receive e_1 from p_1, ..., e_n from p_n at labels : s]]
 =
-if l in labels:
+if yp in labels:
   # use the "done" variable to ensure that s is executed only once, even if 
   # multiple patterns e_i match m.  if the handler has a single at-clause,
   # the "done" variable can be omitted.
@@ -591,17 +605,15 @@ if l in labels:
 # receive without at-clause
 [[receive e_1 from p_1, ..., e_n from p_n : s]]
 =
-same as for receive with at-clause, except omit "if l in labels:"
+same as for receive with at-clause, except omit "if yp in labels:"
 
 
 ------------------------------------------------------------
-Bo’s thesis contains translation of
-queries with tuple patterns to comprehensions without tuple patterns,
-message patterns in handlers to if statements,
-witness of existential quantifications into queries plus retrievals
-
-
-[a]on the contrary, add option for when channel *is* FIFO
-[b]definitely
-[c]each process doesn't have a handle on message queue where it believes the end is?
-[d]theoretically or from an implementation POV
+Bo’s thesis prelim report contains translation of:
+1. queries with tuple patterns to comprehensions without tuple patterns,
+2. message patterns in handlers to if statements, and
+3. witness of existential quantifications into queries plus retrievals.
+[a]each process doesn't have a handle on message queue where it believes the end is?
+[b]I don't see why you attach that question to this sentence in the document, but anyway...  in the semantic approach used in this translation, it is not necessary to distinguish "arrived but not yet received" messages from in-transit messages.  at a yield point, we select in-transit messages and consider them to arrive and be received in a single step.  separating those two actions would not change the visible behavior of the system.
+[c]theoretically or from an implementation POV
+[d]neither the formal semantics of DistAlgo nor the implementation of DistAlgo impose this restriction.  this restriction is imposed only for the purpose of simplifying the centralize-and-sequentialize transformation.  I expect that the implementation of that transformation will follow the description in this document and hence will rely on this restriction.
