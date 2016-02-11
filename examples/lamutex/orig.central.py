@@ -7,6 +7,17 @@ class P(DistProcess):
         self.nrequests = nrequests
         self.q = set()
 
+    def _P_handler_0(self, c2, p):
+        self.q.add(('request', c2, p))
+        self._send(('ack', self.logical_clock(), self.id), p)
+    _P_handler_0._labels = None
+    _P_handler_0._notlabels = None
+
+    def _P_handler_1(self, p):
+        for x in {('request', c, p) for (_ConstantPattern27_, c, _BoundPattern29_) in self.q if (_ConstantPattern27_ == 'request') if (_BoundPattern29_ == p)}:
+            self.q.remove(x)
+            break
+
     def receive(msg= ('request', c2, p)):
         q.add(('request', c2, p))
         send(('ack', logical_clock(), self.id), to= p)
@@ -56,42 +67,42 @@ class P(DistProcess):
             #       c2 > c))) 
            p = c2 = None
 
-            def UniversalOpExpr_0():
-                nonlocal p, c2
-                for (_ConstantPattern0_, c2, p) in self.q:
-                    if (_ConstantPattern0_ == 'request'):
-                        if (not (((c2, p) == (c, self.id)) or ((c, self.id) < (c2, p)))):
-                            return False
-                return True
-            p = c2 = None
+           def UniversalOpExpr_0():
+               nonlocal p, c2
+               for (_ConstantPattern0_, c2, p) in self.q:
+                   if (_ConstantPattern0_ == 'request'):
+                       if (not (((c2, p) == (c, self.id)) or ((c, self.id) < (c2, p)))):
+                           return False
+               return True
+           p = c2 = None
 
-            def UniversalOpExpr_1():
-                nonlocal p, c2
-                for p in self.s:
+           def UniversalOpExpr_1():
+               nonlocal p, c2
+               for p in self.s:
 
-                    def ExistentialOpExpr_2(p):
-                        nonlocal c2
-                        for (_, _, (_ConstantPattern16_, c2, _BoundPattern18_)) in self._PReceivedEvent_0:
-                            if (_ConstantPattern16_ == 'ack'):
-                                if (_BoundPattern18_ == p):
-                                    if (c2 > c):
-                                        return True
-                        return False
-                    if (not ExistentialOpExpr_2(p=p)):
-                        return False
-                return True
-            if (UniversalOpExpr_0() and UniversalOpExpr_1()):
-                _st_label_10 += 1
+                   def ExistentialOpExpr_2(p):
+                       nonlocal c2
+                       for (_, _, (_ConstantPattern16_, c2, _BoundPattern18_)) in self._PReceivedEvent_0:
+                           if (_ConstantPattern16_ == 'ack'):
+                               if (_BoundPattern18_ == p):
+                                   if (c2 > c):
+                                       return True
+                       return False
+                   if (not ExistentialOpExpr_2(p=p)):
+                       return False
+               return True
+           if (UniversalOpExpr_0() and UniversalOpExpr_1()):
+               _st_label_10 += 1
 
-            if yp == 'critical_section' and not done:
-                task()
-                done = True
-            if yp == 'release' and not done:
-                q.remove(('request', c, self.id))
-                send(('release', logical_clock(), self.id), to= s)
+        if yp == 'critical_section' and not done:
+           task()
+           done = True
+        if yp == 'release' and not done:
+           q.remove(('request', c, self.id))
+           send(('release', logical_clock(), self.id), to= s)
 
         send(('done', self.id), to= s)
-        if yp == "_st_label_2"
+        if yp == "_st_label_2":
         # await(each(p in s, has= received(('done', p))))
         output('terminating')
 

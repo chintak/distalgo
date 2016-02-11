@@ -1911,7 +1911,7 @@ class CompoundStmt(Statement):
     def is_atomic(self):
         """True if the body of this compound statement is in one atomic block.
 
-        A block of statements is atomic iff all its statements has no labels,
+        A block of statements is atomic iff all its statements have no labels,
         and recursively all its sub-compound statements are atomic.
         """
         for s in self.body:
