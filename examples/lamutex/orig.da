@@ -4,19 +4,27 @@ class P(process):
     def setup(s:set, nrequests:int):  # s is set of all other processes
         self.q = set()
 
-    def mutex(task):
-        -- request
-        c = logical_clock()
-        send(('request', c, self.id), to= s)
-        q.add(('request', c, self.id))
-        await(each(('request', c2, p) in q,
-                   has= (c2, p)==(c, self.id) or (c, self.id) < (c2, p)) and
-              each(p in s, has= some(received(('ack', c2, _p)), has= c2 > c)))
-        -- critical_section
-        task()
-        -- release
-        q.remove(('request', c, self.id))
-        send(('release', logical_clock(), self.id), to= s)
+    def mutex(task, yp, state):
+        if yp == 'request':
+            c = logical_clock()
+            send(('request', c, self.id), to= s)
+            q.add(('request', c, self.id))
+            state.c = c
+            yp = '_st_label_1'
+        if yp == '_st_label_1':
+            c = state.c
+            await(each(('request', c2, p) in q,
+                       has= (c2, p)==(c, self.id) or (c, self.id) < (c2, p)) and
+                  each(p in s, has= some(received(('ack', c2, _p)), has= c2 > c)))
+            state.c = c
+            yp = 'critical_section'
+        if yp == 'critical_section':
+            task()
+            yp = 'release'
+        if yp == 'release':
+            q.remove(('request', c, self.id))
+            send(('release', logical_clock(), self.id), to= s)
+        return yp, newprocesses, state
 
     def receive(msg= ('request', c2, p)):
         q.add(('request', c2, p))
