@@ -1,7 +1,7 @@
 
 CC=gcc
-CFLAGS=-O3 -std=c99 -fms-extensions
-LDFLAGS=-lrt
+CFLAGS=-O3 -std=c99 -fms-extensions -D_POSIX_C_SOURCE -D_DARWIN_C_SOURCE
+LDFLAGS=
 
 all : lamport
 	strip lamport
