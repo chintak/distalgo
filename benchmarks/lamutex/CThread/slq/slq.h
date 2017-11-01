@@ -24,9 +24,8 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-#ifndef LFQ
-#define LFQ
-#endif
+#ifndef __SLQ_H_
+#define __SLQ_H_
 
 #define CHECK_COND(cond) if (__sync_bool_compare_and_swap(&cond,1,1)) break;
 
@@ -66,3 +65,5 @@ qpop(Queue *,int);
 
 void
 queue_free(Queue *);
+
+#endif

@@ -27,7 +27,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "lfq.h"
+#include "slq.h"
 
 #define MPANIC(x) ;if(x == NULL) { perror("Malloc failed."); exit(1); }
 #define RETDISCARD /* VALUE IS DISCARDED */

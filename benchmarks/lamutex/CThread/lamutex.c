@@ -1,30 +1,39 @@
+#define _POSIX_SOURCE
+#include <signal.h>
 #include <errno.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <string.h>
 #include <pthread.h>
 #include <sched.h>
-#include <unistd.h>
 #include <time.h>
+#include <unistd.h>
+#include <sys/types.h>
 #include <sys/time.h>
 #include <sys/resource.h>
 
 #include "lfqueue.h"
 
-#define MAX(a, b) (((a) > (b)) ? (a) : (b))
-#define ERRMSG(str) { printf("%s:%s:%d: Error - %s\n",			\
-			     __FILE__, __func__, __LINE__, str); goto cleanup; }
-#define MPANIC(a) if ((a) == NULL) ERRMSG("malloc failed");
-#define NZPANIC(a) if ((a)) ERRMSG(strerror((a)));
+#define MAX(a, b) 	(((a) > (b)) ? (a) : (b))
+#define ERRMSG(str) 	{ printf("%s:%s:%d: Error - %s\n",		\
+				 __FILE__, __func__, __LINE__, str); goto cleanup; }
+#define MPANIC(a) 	if ((a) == NULL) ERRMSG("malloc failed");
+#define NZPANIC(a) 	if ((a)) ERRMSG(strerror((a)));
 
 #define THR_ERRMSG(str) {						\
 		printf("%s:%s:%d: Error - %s\n",			\
 		       __FILE__, __func__, __LINE__, str);		\
 		pthread_exit(NULL); }
-#define THR_MPANIC(a) if ((a) == NULL) THR_ERRMSG("thread malloc failed");
-#define THR_NZPANIC(a) if ((a)) THR_ERRMSG(strerror((a)));
+#define THR_MPANIC(a) 	if ((a) == NULL) THR_ERRMSG("thread malloc failed");
+#define THR_NZPANIC(a) 	if ((a)) THR_ERRMSG(strerror((a)));
+
+#define DEBUG
+#define DPRINT(a) 	if (DEBUG==1) { a; }
 
 /***** Data Structures *****/
+
+#define MAX_MSG_PER_WORKER 5
 
 typedef int pid_t;
 
@@ -93,6 +102,10 @@ int handle_done_cond(mem_t* m);
 int handle_message(mem_t* m);
 
 void collect_usage_stats (struct rusage* rstart, struct rusage* rend);
+
+static void core_dump(int sigid) {
+	kill(getpid(), SIGSEGV);
+}
 
 /***** Server functions *****/
 
@@ -215,7 +228,7 @@ handle_done_cond (mem_t* m) {
 	// free worker memory and return
 	if (m->done == num_workers) {
 		// free memory
-		if (m->qmsg) free(m->qmsg);
+		if (m->qmsg) lfqueue_free(m->qmsg);
 		if (m->peers_req) free(m->peers_req);
 		if (m->acks) free(m->acks);
 	}
@@ -225,7 +238,8 @@ handle_done_cond (mem_t* m) {
 void
 init_self_worker_mem (mem_t* m) {
 	m->clock = 0;
-	m->qmsg = lfqueue_create();
+	m->qmsg = lfqueue_create(num_workers * MAX_MSG_PER_WORKER);
+	printf("q addr: %p id: %d\n", m->qmsg, m->id);
 	m->peers_req = (peer_t*) malloc(num_workers * sizeof(peer_t));
 	for (int i = 0; i < num_workers; i++) {
 		m->peers_req[i].id = i;
@@ -259,12 +273,11 @@ worker_done () {
 void
 *worker_main_loop (void* _mem) {
 	int count = 0;
-	struct timespec start, end;
 	mem_t* m = (mem_t*) _mem;
 
 	init_self_worker_mem(m);
 	await(handle_start_cond, m);
-	clock_gettime(CLOCK_MONOTONIC_RAW, &start);
+	__sync_synchronize();
 	while (count < m->num_rounds) {
 //		yield(m, 0);
 
@@ -284,7 +297,6 @@ void
 	}
 
 	worker_done();
-	clock_gettime(CLOCK_MONOTONIC_RAW, &end);
 	await(handle_done_cond, m);
 
 	pthread_exit(NULL);
@@ -315,7 +327,7 @@ send_message (pid_t to, msg_t type, mem_t* m) {
 			lfqueue_enqueue(wk_mems[i].qmsg, dpkt);
 		}
 		free(packet);
-	} else {  // never called
+	} else {
 		lfqueue_enqueue(wk_mems[to].qmsg, (void*) packet);
 	}
 }
@@ -359,7 +371,7 @@ handle_message (mem_t* m) {
 		break;
 	}
 
-	free(d);
+	//if (d) free(d);
 	return 1;
 }
 
@@ -379,13 +391,17 @@ main (int argc, char** argv) {
 	pthread_attr_init(&attr);
 	pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
 
+	// DEBUG - generate core dump file on ^C
+	signal(SIGINT, core_dump);
+
 	num_workers = 5;
 	nrounds = 1;
 	if (argc > 1) num_workers = atoi(argv[1]);
 	if (argc > 2) nrounds = atoi(argv[2]);
 
 	// create workers and assign work
-	workers = (pthread_t*) malloc(num_workers * sizeof(pthread_t)); MPANIC(workers);
+	workers = (pthread_t*) malloc(num_workers * sizeof(pthread_t));
+	MPANIC(workers);
 	setup_worker_memory(nrounds);
 
 	for (uint64_t i = 0; i < num_workers; i++) {

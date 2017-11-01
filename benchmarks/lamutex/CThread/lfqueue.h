@@ -1,19 +1,25 @@
 #ifndef __LFQUEUE_H_
 #define __LFQUEUE_H_
 
+// #define SLQ  // single lock q
+// #define LFQ  // lock free q by Michael and Scott
+
+#ifdef SLQ
 #include <pthread.h>
+#include "slq.h"
 
-#include "lfq.h"
-
-#define LFQ
-
-#ifdef LFQ
 // typedef Queue lfqueue_t;
 typedef struct _ {
 	Queue* q;
 	pthread_mutex_t mutex;
 } lfqueue_t;
-#endif  // end QUEUE_BACKEND
+#endif  // end SLQ
+
+#ifdef LFQ
+#include "lfq.h"
+
+typedef shared_mem_t lfqueue_t;
+#endif  // end LFQ
 
 
 lfqueue_t* 	lfqueue_create ();

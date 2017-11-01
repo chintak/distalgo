@@ -1,17 +1,20 @@
-CC=gcc
-CFLAGS=-g -O0 -Wall -Werror
-INCFLAGS=-I./lfqueue
-LDFLAGS=-L./lfqueue
-LIBS=-llfq -lpthread
+QUEUE_BACKEND=-DLFQ  # -DSLQ or -DLFQ
 
-all : lfq lamutex
+CC=gcc
+CFLAGS= -std=c99 -g3 -O0 -Wall -Werror $(QUEUE_BACKEND)
+INCFLAGS= -I./lfq  -I./slq
+LDFLAGS=  -L./lfq  -L./slq
+LIBS=-lslq -llfq -lpthread
+
+all : lamutex
 #	strip lamutex
 
 %.o : %.c
 	$(CC) $(CFLAGS) $(INCFLAGS) -c  $<
 
-lfq :
-	make -C lfqueue all
+queues :
+	make -C slq all
+	make -C lfq all
 
 lamutex : lamutex.o lfqueue.o
 	$(CC) $(LDFLAGS) -o lamutex $^ $(LIBS)

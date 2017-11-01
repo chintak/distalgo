@@ -29,7 +29,7 @@
 #include <unistd.h>
 #include <pthread.h>
 
-#include "lfq.h"
+#include "slq.h"
 
 #define CHAR_TYPE 0
 
