@@ -1,6 +1,6 @@
 
 CC=gcc
-CFLAGS=-O3 -std=c99 -fms-extensions -D_POSIX_C_SOURCE -D_DARWIN_C_SOURCE
+CFLAGS=-O3 -std=c99 -fms-extensions -D_POSIX_C_SOURCE=199309L -D_DARWIN_C_SOURCE
 LDFLAGS=
 
 all : lamport
