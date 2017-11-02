@@ -1,4 +1,6 @@
 #define _POSIX_SOURCE
+#define _GNU_SOURCE
+
 #include <signal.h>
 #include <errno.h>
 #include <stdlib.h>
@@ -70,6 +72,8 @@ typedef struct _worker_memory {
 	int start;
 	int done;
 	short num_rounds;
+	struct timeval usrtime;
+	struct timeval systime;
 } mem_t;
 
 typedef int (*await_cond_func)(mem_t* m);
@@ -101,7 +105,8 @@ int handle_start_cond(mem_t* m);
 int handle_done_cond(mem_t* m);
 int handle_message(mem_t* m);
 
-void collect_usage_stats (struct rusage* rstart, struct rusage* rend);
+void tv_sub(struct timeval *tva, struct timeval *tvb);
+void collect_usage_stats ();
 
 static void core_dump(int sigid) {
 	kill(getpid(), SIGSEGV);
@@ -126,8 +131,6 @@ server_loop () {
 	// broadcast START
 	// block & check for all the workers to complete num_rounds
 	// broadcast DONE
-	struct rusage rudata_start, rudata_end;
-
 	pthread_mutex_lock(&num_init_mutex);
 	while (num_init < num_workers) {
 		pthread_cond_wait(&num_init_cv, &num_init_mutex);
@@ -135,7 +138,6 @@ server_loop () {
 	pthread_mutex_unlock(&num_init_mutex);
 
 	send_message(BROADCAST, START, NULL);
-	getrusage(RUSAGE_SELF, &rudata_start);
 
 	pthread_mutex_lock(&num_done_mutex);
 	while (num_done < num_workers) {
@@ -143,10 +145,9 @@ server_loop () {
 	}
 	pthread_mutex_unlock(&num_done_mutex);
 
-	getrusage(RUSAGE_SELF, &rudata_end);
 	send_message(BROADCAST, DONE, NULL);
 	// collect stats
-	collect_usage_stats(&rudata_start, &rudata_end);
+	collect_usage_stats();
 }
 
 /***** Critical Section *****/
@@ -239,7 +240,6 @@ void
 init_self_worker_mem (mem_t* m) {
 	m->clock = 0;
 	m->qmsg = lfqueue_create(num_workers * MAX_MSG_PER_WORKER);
-	printf("q addr: %p id: %d\n", m->qmsg, m->id);
 	m->peers_req = (peer_t*) malloc(num_workers * sizeof(peer_t));
 	for (int i = 0; i < num_workers; i++) {
 		m->peers_req[i].id = i;
@@ -260,8 +260,13 @@ init_self_worker_mem (mem_t* m) {
 }
 
 void
-worker_done () {
+worker_done (mem_t* m, struct rusage* rudata_start, struct rusage* rudata_end) {
 	// worker done
+	tv_sub(&rudata_end->ru_utime, &rudata_start->ru_utime);
+	tv_sub(&rudata_end->ru_stime, &rudata_start->ru_stime);
+	m->usrtime = rudata_end->ru_utime;
+	m->systime = rudata_end->ru_stime;
+
 	pthread_mutex_lock(&num_done_mutex);
 	num_done++;
 	if (num_done == num_workers) {
@@ -274,10 +279,12 @@ void
 *worker_main_loop (void* _mem) {
 	int count = 0;
 	mem_t* m = (mem_t*) _mem;
+	struct rusage rudata_start, rudata_end;
 
 	init_self_worker_mem(m);
 	await(handle_start_cond, m);
-	__sync_synchronize();
+	getrusage(RUSAGE_THREAD, &rudata_start);
+
 	while (count < m->num_rounds) {
 //		yield(m, 0);
 
@@ -296,7 +303,8 @@ void
 		count++;
 	}
 
-	worker_done();
+	getrusage(RUSAGE_THREAD, &rudata_end);
+	worker_done(m, &rudata_start, &rudata_end);
 	await(handle_done_cond, m);
 
 	pthread_exit(NULL);
@@ -452,16 +460,18 @@ void tv_sub(struct timeval *tva, struct timeval *tvb)
 }
 
 void
-collect_usage_stats (struct rusage* rstart, struct rusage* rend) {
-	tv_sub(&rend->ru_utime, &rstart->ru_utime);
-	tv_sub(&rend->ru_stime, &rstart->ru_stime);
-	tv_add(&rend->ru_stime, &rend->ru_utime);
+collect_usage_stats () {
+	struct timeval usrtime, systime;
+	for (int i = 0; i < num_workers; i++) {
+		tv_add(&usrtime, &wk_mems[i].usrtime);
+		tv_add(&systime, &wk_mems[i].systime);
+	}
+	tv_add(&systime, &usrtime);
 
-	printf(
-		"###OUTPUT: {\"Total_processes\": %d,    \
-\"Total_process_time\": %ld.%06ld,		    \
+	printf("###OUTPUT: {\"Total_processes\": %d,    \
+\"Total_process_time\": %ld.%06ld,			\
 \"Total_user_time\": %ld.%06ld}\n",
-		num_workers,
-		rend->ru_stime.tv_sec, (long) rend->ru_stime.tv_usec,
-		rend->ru_utime.tv_sec, (long) rend->ru_utime.tv_usec);
+	       num_workers,
+	       systime.tv_sec, (long) systime.tv_usec,
+	       usrtime.tv_sec, (long) usrtime.tv_usec);
 }

@@ -1,4 +1,4 @@
-QUEUE_BACKEND=-DLFQ  # -DSLQ or -DLFQ
+QUEUE_BACKEND=-DSLQ  # -DSLQ or -DLFQ
 
 CC=gcc
 CFLAGS= -std=c99 -g3 -O0 -Wall -Werror $(QUEUE_BACKEND)

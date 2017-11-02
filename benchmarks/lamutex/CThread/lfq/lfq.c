@@ -27,9 +27,9 @@ reclaim(shared_mem_t* smp, ushort_t node) {
 
 	for (success = FALSE; success == FALSE; ) {
 		curfree = smp->freeidx;
+		smp->nodes[node].next.sep.ptr = curfree;
 		success = CAS(&smp->freeidx, curfree, node);
 	}
-	smp->nodes[node].next.sep.ptr = curfree;
 //	printf("(free %d) ", node);
 }
 
