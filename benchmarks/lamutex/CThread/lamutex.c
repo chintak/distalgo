@@ -30,9 +30,6 @@
 #define THR_MPANIC(a) 	if ((a) == NULL) THR_ERRMSG("thread malloc failed");
 #define THR_NZPANIC(a) 	if ((a)) THR_ERRMSG(strerror((a)));
 
-#define DEBUG
-#define DPRINT(a) 	if (DEBUG==1) { a; }
-
 /***** Data Structures *****/
 
 #define MAX_MSG_PER_WORKER 5
@@ -105,12 +102,9 @@ int handle_start_cond(mem_t* m);
 int handle_done_cond(mem_t* m);
 int handle_message(mem_t* m);
 
+void tv_add(struct timeval *tva, struct timeval *tvb);
 void tv_sub(struct timeval *tva, struct timeval *tvb);
 void collect_usage_stats ();
-
-static void core_dump(int sigid) {
-	kill(getpid(), SIGSEGV);
-}
 
 /***** Server functions *****/
 
@@ -264,6 +258,7 @@ worker_done (mem_t* m, struct rusage* rudata_start, struct rusage* rudata_end) {
 	// worker done
 	tv_sub(&rudata_end->ru_utime, &rudata_start->ru_utime);
 	tv_sub(&rudata_end->ru_stime, &rudata_start->ru_stime);
+	tv_add(&rudata_end->ru_stime, &rudata_end->ru_utime);
 	m->usrtime = rudata_end->ru_utime;
 	m->systime = rudata_end->ru_stime;
 
@@ -279,7 +274,8 @@ void
 *worker_main_loop (void* _mem) {
 	int count = 0;
 	mem_t* m = (mem_t*) _mem;
-	struct rusage rudata_start, rudata_end;
+	struct rusage rudata_start;
+	struct rusage rudata_end;
 
 	init_self_worker_mem(m);
 	await(handle_start_cond, m);
@@ -379,7 +375,7 @@ handle_message (mem_t* m) {
 		break;
 	}
 
-	//if (d) free(d);
+	if (d) free(d);
 	return 1;
 }
 
@@ -398,9 +394,6 @@ main (int argc, char** argv) {
 	pthread_cond_init (&num_done_cv, NULL);
 	pthread_attr_init(&attr);
 	pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
-
-	// DEBUG - generate core dump file on ^C
-	signal(SIGINT, core_dump);
 
 	num_workers = 5;
 	nrounds = 1;
@@ -461,12 +454,15 @@ void tv_sub(struct timeval *tva, struct timeval *tvb)
 
 void
 collect_usage_stats () {
-	struct timeval usrtime, systime;
+	struct timeval usrtime;
+	struct timeval systime;
+	memset((void*) &systime, 0, sizeof(struct timeval));
+	memset((void*) &usrtime, 0, sizeof(struct timeval));
+
 	for (int i = 0; i < num_workers; i++) {
 		tv_add(&usrtime, &wk_mems[i].usrtime);
 		tv_add(&systime, &wk_mems[i].systime);
 	}
-	tv_add(&systime, &usrtime);
 
 	printf("###OUTPUT: {\"Total_processes\": %d,    \
 \"Total_process_time\": %ld.%06ld,			\

@@ -1,7 +1,13 @@
-QUEUE_BACKEND=-DSLQ  # -DSLQ or -DLFQ
+ifndef ${Q}
+	Q=LFQ
+endif
 
 CC=gcc
-CFLAGS= -std=c99 -g3 -O0 -Wall -Werror $(QUEUE_BACKEND)
+ifndef ${DEBUG}
+	CFLAGS= -std=c99 -O3 -Wall -Werror -D${Q}  # -DSLQ or -DLFQ
+else
+	CFLAGS= -std=c99 -g3 -O0 -Wall -Werror -D${Q}
+endif
 INCFLAGS= -I./lfq  -I./slq
 LDFLAGS=  -L./lfq  -L./slq
 LIBS=-lslq -llfq -lpthread
