@@ -1,11 +1,27 @@
+/*
+ * ORIGINAL
+ * Author: Prof Michael Scott
+ * The following lock free queue implementation was provided by Prof Michael Scott.
+ * It can be found under "new" folder in from http://www.cs.rochester.edu/research/synchronization/code/concurrent_queues/SGI.tgz.
+ *
+ * MODIFICATION
+ * Author: Chintak Sheth
+ * The necessary changes are indicated appropriately in comments alongside the functions.
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include "lfq.h"
 
-#define CAS(ptr, oval, nval)						\
+/* Modified: change the cas definition to use GCC Atomics */
+#define cas(ptr, oval, nval)						\
 	(unsigned) __sync_bool_compare_and_swap((ptr), (oval), (nval))
 
+/* Modified: original implementation made use of a single free node and performed
+ * an enqueue followed by a dequeue. For our application, however this does not hold
+ * hence we implement a lock free LIFO free node list.
+ */
 ushort_t
 new_node(shared_mem_t* smp) {
 	unsigned success;
@@ -14,12 +30,15 @@ new_node(shared_mem_t* smp) {
 	for (success = FALSE; success == FALSE; ) {
 		node = smp->freeidx;
 		newfree = smp->nodes[node].next.sep.ptr;
-		success = CAS(&smp->freeidx, node, newfree);
+		success = cas(&smp->freeidx, node, newfree);
 	}
-//	printf("(new %d) ", node);
 	return node;
 }
 
+/* Modified: original implementation made use of a single free node and performed
+ * an enqueue followed by a dequeue. For our application, however this does not hold
+ * hence we implement a lock free LIFO free node list.
+ */
 void
 reclaim(shared_mem_t* smp, ushort_t node) {
 	ushort_t curfree;
@@ -28,15 +47,15 @@ reclaim(shared_mem_t* smp, ushort_t node) {
 	for (success = FALSE; success == FALSE; ) {
 		curfree = smp->freeidx;
 		smp->nodes[node].next.sep.ptr = curfree;
-		success = CAS(&smp->freeidx, curfree, node);
+		success = cas(&smp->freeidx, curfree, node);
 	}
-//	printf("(free %d) ", node);
 }
 
 void
 init_queue(shared_mem_t* smp, int max_nodes)
 {
 	unsigned i;
+	/* Modified: allocate memory for the nodes */
 	/* init node free list */
 	if (!smp->nodes) {
 		smp->nodes = (node_t*) malloc((max_nodes+1) * sizeof(node_t));
@@ -73,28 +92,28 @@ enqueue(shared_mem_t* smp, void* val)
 	smp->nodes[node].value = val;
 	smp->nodes[node].next.sep.ptr = NULL;
 
-//	backoff = backoff_base;
+//	backoff = backoff_base; /* Modified: commented */
 	for (success = FALSE; success == FALSE; ) {
 		tail.con = smp->tail.con;
 		next.con = smp->nodes[tail.sep.ptr].next.con;
 		if (tail.con == smp->tail.con) {
 			if (next.sep.ptr == NULL) {
-//				backoff = backoff_base;
-				success = CAS(
+//				backoff = backoff_base; /* Modified: commented */
+				success = cas(
 					(ulong_t*) &smp->nodes[tail.sep.ptr].next,
 					next.con,
 					MAKE_LONG(node, next.sep.count+1));
 			}
 			if (success == FALSE) {
-				CAS((ulong_t*) &smp->tail,
+				cas((ulong_t*) &smp->tail,
 				    tail.con,
 				    MAKE_LONG(smp->nodes[tail.sep.ptr].next.sep.ptr,
 					      tail.sep.count+1));
-//				backoff_delay();
+//				backoff_delay(); /* Modified: commented */
 			}
 		}
 	}
-	success = CAS((ulong_t*) &smp->tail,
+	success = cas((ulong_t*) &smp->tail,
 		      tail.con,
 		      MAKE_LONG(node, tail.sep.count+1));
 	return;  // REMOVE
@@ -109,7 +128,7 @@ dequeue(shared_mem_t* smp)
 	pointer_t tail;
 	pointer_t next;
 
-//	backoff = backoff_base;
+//	backoff = backoff_base; /* Modified: commented */
 	for (success = FALSE; success == FALSE; ) {
 		head.con = smp->head.con;
 		tail.con = smp->tail.con;
@@ -119,17 +138,17 @@ dequeue(shared_mem_t* smp)
 				if (next.sep.ptr == NULL) {
 					return nullptr;
 				}
-				CAS((ulong_t*) &smp->tail,
+				cas((ulong_t*) &smp->tail,
 				    tail.con,
 				    MAKE_LONG(next.sep.ptr, tail.sep.count+1));
-//				backoff_delay();
+//				backoff_delay();  /* Modified: commented */
 			} else {
 				value = smp->nodes[next.sep.ptr].value;
-				success = CAS((ulong_t*) &smp->head,
+				success = cas((ulong_t*) &smp->head,
 					      head.con,
 					      MAKE_LONG(next.sep.ptr, head.sep.count+1));
 				if (success == FALSE) {
-//					backoff_delay();
+//					backoff_delay(); /* Modified: commented */
 				}
 			}
 		}
