@@ -104,7 +104,9 @@ int handle_message(mem_t* m);
 
 void tv_add(struct timeval *tva, struct timeval *tvb);
 void tv_sub(struct timeval *tva, struct timeval *tvb);
-void collect_usage_stats ();
+
+void collect_usage_stats(double wallclock);
+double get_wallclock_sample();
 
 /***** Server functions *****/
 
@@ -125,11 +127,13 @@ server_loop () {
 	// broadcast START
 	// block & check for all the workers to complete num_rounds
 	// broadcast DONE
+	double wallclock_start, wallclock_total;
 	pthread_mutex_lock(&num_init_mutex);
 	while (num_init < num_workers) {
 		pthread_cond_wait(&num_init_cv, &num_init_mutex);
 	}
 	pthread_mutex_unlock(&num_init_mutex);
+	wallclock_start = get_wallclock_sample();
 
 	send_message(BROADCAST, START, NULL);
 
@@ -139,9 +143,10 @@ server_loop () {
 	}
 	pthread_mutex_unlock(&num_done_mutex);
 
+	wallclock_total = get_wallclock_sample() - wallclock_start;
 	send_message(BROADCAST, DONE, NULL);
 	// collect stats
-	collect_usage_stats();
+	collect_usage_stats(wallclock_total);
 }
 
 /***** Critical Section *****/
@@ -185,6 +190,13 @@ leave_critical_section (mem_t* m) {
 	// clear req
 	// broadcast RELEASE
 	send_message(BROADCAST, RELEASE, m);
+}
+
+double
+get_wallclock_sample () {
+    struct timespec tp;
+    clock_gettime(CLOCK_MONOTONIC_RAW, &tp);
+    return (double)tp.tv_sec + (double)tp.tv_nsec / 1e9;
 }
 
 /***** Worker functions *****/
@@ -453,7 +465,7 @@ void tv_sub(struct timeval *tva, struct timeval *tvb)
 }
 
 void
-collect_usage_stats () {
+collect_usage_stats (double wallclock) {
 	struct timeval usrtime;
 	struct timeval systime;
 	memset((void*) &systime, 0, sizeof(struct timeval));
@@ -464,10 +476,14 @@ collect_usage_stats () {
 		tv_add(&systime, &wk_mems[i].systime);
 	}
 
-	printf("###OUTPUT: {\"Total_processes\": %d,    \
-\"Total_process_time\": %ld.%06ld,			\
-\"Total_user_time\": %ld.%06ld}\n",
+	printf("###OUTPUT: {\"Total_processes\": %4d,"
+	       "\t\"Num_rounds\": %3d,"
+	       "\t\"Wallclock_time\": %2.06f,"
+	       "\t\"Total_process_time\": %ld.%06ld,"
+	       "\t\"Total_user_time\": %ld.%06ld}\n",
 	       num_workers,
+	       wk_mems[0].num_rounds,
+	       wallclock,
 	       systime.tv_sec, (long) systime.tv_usec,
 	       usrtime.tv_sec, (long) usrtime.tv_usec);
 }

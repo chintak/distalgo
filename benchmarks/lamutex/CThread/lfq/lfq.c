@@ -30,6 +30,10 @@ new_node(shared_mem_t* smp) {
 	for (success = FALSE; success == FALSE; ) {
 		node = smp->freeidx;
 		newfree = smp->nodes[node].next.sep.ptr;
+		if (node == newfree) {
+			fprintf(stderr, "Exhausted all free nodes in LFQ queue. Exit.\n");
+			exit(-1);
+		}
 		success = cas(&smp->freeidx, node, newfree);
 	}
 	return node;
@@ -74,7 +78,7 @@ init_queue(shared_mem_t* smp, int max_nodes)
 		smp->nodes[i].next.sep.ptr = i+1;
 		smp->nodes[i].next.sep.count = 0;
 	}
-	smp->nodes[max_nodes].next.sep.ptr = NULL;
+	smp->nodes[max_nodes].next.sep.ptr = max_nodes;
 	smp->nodes[max_nodes].next.sep.count = 0;
 
 	smp->freeidx = 2;

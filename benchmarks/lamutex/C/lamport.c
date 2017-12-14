@@ -2,7 +2,7 @@
  * Copyright (c) 2010-2015 Yanhong Annie Liu
  * Copyright (c) 2010-2015 Stony Brook University
  * Copyright (c) 2010-2015 The Research Foundation of SUNY
- * 
+ *
  * Permission is hereby granted, free of charge, to any person
  * obtaining a copy of this software and associated documentation files
  * (the "Software"), to deal in the Software without restriction,
@@ -10,10 +10,10 @@
  * publish, distribute, sublicense, and/or sell copies of the Software,
  * and to permit persons to whom the Software is furnished to do so,
  * subject to the following conditions:
- * 
+ *
  * The above copyright notice and this permission notice shall be
  * included in all copies or substantial portions of the Software.
- * 
+ *
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
  * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
  * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
@@ -253,11 +253,15 @@ static void dump_perf_stats(double wallclock)
                                              * store the total process
                                              * time */
     printf(
-        "###OUTPUT: {\"Total_memory\": %ld, \
-\"Wallclock_time\": %f, \"Total_processes\": %d, \
-\"Total_process_time\": %ld.%06ld, \
-\"Total_user_time\": %ld.%06ld}\n",
-        g.total_memory, wallclock, g.npeers,
+        "###OUTPUT: {"
+//	"\"Total_memory\": %ld,"
+	"\"Total_processes\": %4d,"
+	"\t\"Num_rounds\": %3d,"
+	"\t\"Wallclock_time\": %2.06f,"
+	"\t\"Total_process_time\": %ld.%06ld,"
+	"\t\"Total_user_time\": %ld.%06ld}\n",
+//        g.total_memory,
+	g.npeers, g.rounds_to_run, wallclock,
         g.total_stime.tv_sec, (long) g.total_stime.tv_usec,
         g.total_utime.tv_sec, (long) g.total_utime.tv_usec);
 }
